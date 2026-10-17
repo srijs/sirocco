@@ -1,0 +1,8 @@
+# typos configuration: https://github.com/crate-ci/typos
+
+[files]
+extend-exclude = ["Cargo.lock"]
+
+[default.extend-words]
+# CPUID vendor string fragments ("GenuineIntel" is split across registers).
+ine = "ine"

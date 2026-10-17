@@ -1,0 +1,45 @@
+[package]
+name = "compare"
+version = "0.0.0"
+description = "Differential tests and benchmarks of sirocco against libdeflate and other DEFLATE libraries"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+adler2 = "2.0.1"
+adler32furious.workspace = true
+sirocco = { path = "../.." }
+libdeflater = "1.26"
+libdeflate-sys = "1.26"
+miniz_oxide = "0.9"
+zenflate = { version = "0.4", optional = true }
+zlib-rs = "0.6"
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+proptest = "1"
+
+[[bench]]
+name = "checksums"
+harness = false
+
+[[bench]]
+name = "decompress"
+harness = false
+
+[[bench]]
+name = "deflate"
+harness = false
+
+[lib]
+bench = false
+
+[features]
+# zenflate is AGPL-3.0-only or commercial: opt in to benchmark against it.
+# It stays out of sirocco itself; this crate is never published.
+zenflate = ["dep:zenflate"]

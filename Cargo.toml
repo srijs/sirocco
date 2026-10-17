@@ -1,0 +1,106 @@
+[package]
+name = "sirocco"
+version = "0.1.0"
+description = "Fast DEFLATE, zlib and gzip decompression in pure Rust"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["deflate", "zlib", "gzip", "inflate", "decompression"]
+categories = ["compression", "no-std"]
+include = ["/src", "/LICENSE-MIT", "/LICENSE-APACHE", "/README.md"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["std"]
+std = ["alloc", "adler32furious/std", "crc32fast/std"]
+alloc = []
+
+[dependencies]
+adler32furious.workspace = true
+crc32fast = { version = "1.5", default-features = false }
+
+[dev-dependencies]
+miniz_oxide = "0.9"
+proptest = "1"
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[workspace]
+resolver = "2"
+members = ["crates/compare"]
+
+[workspace.package]
+edition = "2021"
+# adler32furious needs 1.89.
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/srijs/sirocco"
+
+[workspace.dependencies]
+adler32furious = { version = "0.1.1", default-features = false }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+# `sirocco_no_bmi2` is set by scripts/bench.sh to time the decoder without
+# BMI2; `docsrs` by docs.rs.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(sirocco_no_bmi2)", "cfg(docsrs)"] }
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Bit-twiddling and SIMD code casts between integer widths on purpose.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+module_name_repetitions = "allow"
+inline_always = "allow"
+# `use core::arch::x86_64::*` is the norm for intrinsics.
+wildcard_imports = "allow"
+# Unrolled SIMD kernels are long by nature.
+too_many_lines = "allow"
+# CPU feature sets are naturally a bag of bools.
+struct_excessive_bools = "allow"
+# Tests build large fixed-size buffers on the stack.
+large_stack_arrays = "allow"
+# Docs name CPU instructions (PCLMULQDQ, AVX512VNNI) that are not code.
+doc_markdown = "allow"
+# Per-arch `select` functions share one signature even when one cannot fail.
+unnecessary_wraps = "allow"
+# `const _: () = assert!(..)` checks sit next to the code they guard.
+items_after_statements = "allow"
+enum_glob_use = "allow"
+# Paired names such as `out_len`/`in_len` are clearer than distinct ones.
+similar_names = "allow"
+# Every fallible API returns `DecompressError`, whose variants are documented;
+# and the remaining panics are `unwrap`s that cannot fail.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Fires on nearly every helper; add `#[must_use]` by hand where it matters.
+must_use_candidate = "allow"
+# Unsafe code must explain itself.
+undocumented_unsafe_blocks = "warn"
+missing_safety_doc = "warn"
+multiple_unsafe_ops_per_block = "allow"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[profile.bench]
+debug = true
+
+[profile.release]
+debug = true

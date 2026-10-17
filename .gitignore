@@ -1,0 +1,8 @@
+target/
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/Cargo.lock
+corpus/
+proptest-regressions/
+*.proptest-regressions
