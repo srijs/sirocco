@@ -20,11 +20,10 @@ Fast DEFLATE, zlib and gzip decompression in pure Rust.
 - **Tested.** Differentially tested (with proptest) and fuzzed against
   libdeflate.
 
-Adler-32 comes from [adler32furious](https://crates.io/crates/adler32furious)
-(SIMD on x86 and AArch64) and CRC-32 from
-[crc32fast](https://crates.io/crates/crc32fast).
+Relies on hardware-accelerated CRC-32 from [crc32fast](https://crates.io/crates/crc32fast)
+and Adler-32 from [adler32furious](https://crates.io/crates/adler32furious).
 
-sirocco decompresses only.
+Does not support compression/deflating yet.
 
 ## Usage
 
@@ -124,43 +123,6 @@ Much of sirocco is its own work, though:
   libdeflate on highly repetitive data on Apple M4 into a lead.
 - **An idiomatic Rust API**, `no_std` support, and a differential test,
   fuzzing and benchmark suite against libdeflate and zlib-rs.
-
-## Layout
-
-| Path | What |
-| --- | --- |
-| `/` (root) | The `sirocco` library. Uses `std` by default; `default-features = false` builds it `no_std`, and adding the `alloc` feature keeps the `Vec` helpers. |
-| `crates/compare` | Differential tests, the benchmark suite and Criterion benchmarks against libdeflate (via the `libdeflater` crate), zlib-rs, miniz_oxide and, opt-in, zenflate. Not published. |
-| `fuzz` | `cargo fuzz` targets that check sirocco against libdeflate. |
-
-## Testing and benchmarking
-
-```sh
-cargo test --workspace
-cargo bench -p compare                       # sirocco vs libdeflate
-cargo bench -p compare --features zenflate   # also zenflate (AGPL-3.0, opt-in)
-cargo +nightly fuzz run decompress
-```
-
-Tests and benchmarks use a small synthetic corpus by default. For real data,
-fetch the public corpora (Silesia, Canterbury, enwik8, about 330 MB) into
-`corpus/`, which is picked up automatically:
-
-```sh
-scripts/fetch-corpus.sh                      # or e.g. `scripts/fetch-corpus.sh silesia`
-SIROCCO_CORPUS_DIR=~/my-files cargo test   # use a different directory instead
-```
-
-Speed changes are measured with the benchmark suite: size classes from
-under 256 B to MB scale, every block type, real corpora and git packs,
-one-shot, streaming and measuring, against a base revision, libdeflate and
-zlib-rs, averaged over code layouts. See
-[crates/compare/BENCH.md](crates/compare/BENCH.md) for what it covers and how
-to report its numbers.
-
-```sh
-scripts/bench.sh --base origin/main          # this branch vs main
-```
 
 ## License
 
