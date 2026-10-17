@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 adler2 = "2.0.1"
 adler32furious.workspace = true
+crc32fast = { workspace = true, features = ["std"] }
 sirocco = { path = "../.." }
 libdeflater = "1.26"
 libdeflate-sys = "1.26"

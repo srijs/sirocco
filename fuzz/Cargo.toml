@@ -17,13 +17,6 @@ compare = { path = "../crates/compare" }
 [workspace]
 
 [[bin]]
-name = "checksums"
-path = "fuzz_targets/checksums.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "decompress"
 path = "fuzz_targets/decompress.rs"
 test = false

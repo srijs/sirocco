@@ -229,8 +229,8 @@ impl Check {
         self.len += data.len() as u64;
         self.value = match self.format {
             Format::Deflate => 0,
-            Format::Zlib => crate::adler32(self.value, data),
-            Format::Gzip => crate::crc32(self.value, data),
+            Format::Zlib => crate::checksum::adler32(self.value, data),
+            Format::Gzip => crate::checksum::crc32(self.value, data),
         };
     }
 

@@ -66,8 +66,8 @@ See the [documentation](https://docs.rs/sirocco) for reusing a
 - `alloc`: everything that returns a `Vec`, `StreamDecompressor` and
   `StreamMeasurer`.
 
-With `default-features = false`, the checksums,
-`Decompressor::decompress_into` and `Decompressor::measure` still work.
+With `default-features = false`, `Decompressor::decompress_into` and
+`Decompressor::measure` still work.
 
 The minimum supported Rust version is 1.89.
 

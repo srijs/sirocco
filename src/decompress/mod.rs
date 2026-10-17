@@ -383,7 +383,7 @@ fn reference_compress(format: Format, level: i32, data: &[u8]) -> Vec<u8> {
         Format::Gzip => {
             let mut out = alloc::vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
             out.extend(compress_to_vec(data, level));
-            out.extend(crate::crc32(0, data).to_le_bytes());
+            out.extend(crate::checksum::crc32(0, data).to_le_bytes());
             out.extend((data.len() as u32).to_le_bytes());
             out
         }

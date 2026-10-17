@@ -215,6 +215,7 @@ version = "0.0.0"
 dependencies = [
  "adler2",
  "adler32furious",
+ "crc32fast",
  "criterion",
  "libdeflate-sys",
  "libdeflater",

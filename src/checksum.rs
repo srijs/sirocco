@@ -9,7 +9,7 @@
 /// Pass `1` as the initial value to start a new checksum.
 #[inline]
 #[must_use]
-pub fn adler32(adler: u32, data: &[u8]) -> u32 {
+pub(crate) fn adler32(adler: u32, data: &[u8]) -> u32 {
     let mut a = adler32furious::Adler32::from_checksum(adler);
     a.update(data);
     a.checksum()
@@ -19,7 +19,7 @@ pub fn adler32(adler: u32, data: &[u8]) -> u32 {
 ///
 /// Pass `0` as the initial value to start a new checksum.
 #[must_use]
-pub fn crc32(crc: u32, data: &[u8]) -> u32 {
+pub(crate) fn crc32(crc: u32, data: &[u8]) -> u32 {
     let mut hasher = crc32fast::Hasher::new_with_initial(crc);
     hasher.update(data);
     hasher.finalize()

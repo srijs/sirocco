@@ -43,7 +43,8 @@
 //! - `std` (default): implements `std` integrations and enables `alloc`.
 //! - `alloc` (default, via `std`): everything that returns a `Vec`, and
 //!   [`StreamDecompressor`]. Without
-//!   it, checksums and [`Decompressor::decompress_into`] still work.
+//!   it, [`Decompressor::decompress_into`] and [`Decompressor::measure`]
+//!   still work.
 
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -59,7 +60,6 @@ mod checksum;
 mod decompress;
 mod format;
 
-pub use checksum::{adler32, crc32};
 #[cfg(feature = "std")]
 pub use decompress::DecompressReader;
 pub use decompress::{DecompressError, Decompressed, Decompressor, Measured};

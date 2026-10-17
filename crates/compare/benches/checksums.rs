@@ -6,9 +6,6 @@ fn bench(c: &mut Criterion) {
     let mut g = c.benchmark_group("adler32");
     for s in &corpus {
         g.throughput(Throughput::Bytes(s.data.len() as u64));
-        g.bench_with_input(BenchmarkId::new("sirocco", &s.name), &s.data, |b, d| {
-            b.iter(|| sirocco::adler32(1, d));
-        });
         // Every implementation this CPU supports, not just the dispatched one.
         for imp in adler32furious::implementations() {
             let id = BenchmarkId::new(format!("adler32furious-{}", imp.name()), &s.name);
@@ -44,8 +41,8 @@ fn bench(c: &mut Criterion) {
     let mut g = c.benchmark_group("crc32");
     for s in &corpus {
         g.throughput(Throughput::Bytes(s.data.len() as u64));
-        g.bench_with_input(BenchmarkId::new("sirocco", &s.name), &s.data, |b, d| {
-            b.iter(|| sirocco::crc32(0, d));
+        g.bench_with_input(BenchmarkId::new("crc32fast", &s.name), &s.data, |b, d| {
+            b.iter(|| crc32fast::hash(d));
         });
         g.bench_with_input(BenchmarkId::new("libdeflate", &s.name), &s.data, |b, d| {
             b.iter(|| {
