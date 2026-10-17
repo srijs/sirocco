@@ -12,39 +12,37 @@
 //! let compressed = [0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x00];
 //! let data = sirocco::decompress(Format::Deflate, &compressed, 1 << 20)?;
 //! assert_eq!(data, b"hello hello hello");
-//! # Ok::<(), sirocco::DecompressError>(())
+//! # Ok::<(), sirocco::inflate::Error>(())
 //! ```
 //!
-//! To decompress many buffers, reuse a [`Decompressor`]: it holds decode
-//! tables that are costly to set up. [`Decompressor::decompress_into`] writes
-//! into a buffer you provide, which also works without an allocator.
+//! Everything else is in [`inflate`]:
 //!
-//! When the input arrives in pieces, or the output is too large to hold at
-//! once, use [`StreamDecompressor`], or [`DecompressReader`] to read
-//! decompressed data from any [`std::io::BufRead`]:
+//! - [`inflate::Decoder`] decompresses into your buffer, from input in one
+//!   piece or many, without allocating. Reuse it: its tables are costly to
+//!   set up.
+//! - [`inflate::Reader`] reads from any [`std::io::BufRead`]:
 //!
 //! ```
 //! use std::io::Read;
+//! use sirocco::{inflate, Format};
 //!
 //! # let compressed = [0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x00];
-//! let mut reader = sirocco::DecompressReader::new(sirocco::Format::Deflate, &compressed[..]);
+//! let mut reader = inflate::Reader::new(Format::Deflate, &compressed[..]);
 //! let mut data = String::new();
 //! reader.read_to_string(&mut data)?;
 //! assert_eq!(data, "hello hello hello");
 //! # Ok::<(), std::io::Error>(())
 //! ```
 //!
-//! To find where a stream ends and how long its output is without
-//! decompressing it into memory, for example to walk a git pack, use
-//! [`Decompressor::measure`] or, for input in pieces, [`StreamMeasurer`].
+//! - [`inflate::Scanner`] finds a stream's end and output length without
+//!   writing it, for example to walk a git pack.
 //!
 //! # Features
 //!
-//! - `std` (default): implements `std` integrations and enables `alloc`.
-//! - `alloc` (default, via `std`): everything that returns a `Vec`, and
-//!   [`StreamDecompressor`]. Without
-//!   it, [`Decompressor::decompress_into`] and [`Decompressor::measure`]
-//!   still work.
+//! - `std` (default): [`inflate::Reader`] and `std::io` integrations;
+//!   enables `alloc`.
+//! - `alloc`: [`decompress`]. Without it, [`inflate::Decoder`] and
+//!   [`inflate::Scanner`] still work.
 
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -57,16 +55,9 @@ extern crate alloc;
 extern crate std;
 
 mod checksum;
-mod decompress;
 mod format;
+pub mod inflate;
 
-#[cfg(feature = "std")]
-pub use decompress::DecompressReader;
-pub use decompress::{DecompressError, Decompressed, Decompressor, Measured};
-#[cfg(feature = "alloc")]
-pub use decompress::{
-    MeasureProgress, StreamDecompressor, StreamMeasurer, StreamProgress, StreamStatus,
-};
 pub use format::Format;
 
 // Compile and run the README's examples as doctests.
@@ -76,13 +67,18 @@ struct ReadmeDoctests;
 
 /// Decompresses all of `input` into a new `Vec` of at most `max_len` bytes.
 ///
-/// See [`Decompressor::decompress`] for the details. This sets up a fresh
-/// [`Decompressor`] each time; reuse one to decompress many buffers.
+/// `input` must be one stream, else
+/// [`TrailingData`](inflate::Error::TrailingData); for gzip, all members are
+/// decompressed, as `gzip -d` does. Longer output than `max_len` is
+/// [`InsufficientSpace`](inflate::Error::InsufficientSpace).
+///
+/// It sets up decode tables each call; for many buffers, reuse an
+/// [`inflate::Decoder`].
 #[cfg(feature = "alloc")]
 pub fn decompress(
     format: Format,
     input: &[u8],
     max_len: usize,
-) -> Result<alloc::vec::Vec<u8>, DecompressError> {
-    Decompressor::new(format).decompress(input, max_len)
+) -> Result<alloc::vec::Vec<u8>, inflate::Error> {
+    inflate::decompress(format, input, max_len)
 }

@@ -1,6 +1,6 @@
 [package]
 name = "sirocco"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fast DEFLATE, zlib and gzip decompression in pure Rust"
 edition.workspace = true
 rust-version.workspace = true
@@ -85,7 +85,7 @@ items_after_statements = "allow"
 enum_glob_use = "allow"
 # Paired names such as `out_len`/`in_len` are clearer than distinct ones.
 similar_names = "allow"
-# Every fallible API returns `DecompressError`, whose variants are documented;
+# Every fallible API returns `inflate::Error`, whose variants are documented;
 # and the remaining panics are `unwrap`s that cannot fail.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"

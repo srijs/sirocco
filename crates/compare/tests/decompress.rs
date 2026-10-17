@@ -2,26 +2,25 @@
 //! on valid streams (output and consumed input) and on corrupt ones (which
 //! error is returned).
 
-use compare::{reference_compress, sirocco_decompress, Format, Outcome, ReferenceDecompressor};
+use compare::{
+    assert_agree, reference_compress, sirocco_decompress, Format, Outcome, ReferenceDecompressor,
+    SiroccoDecoders,
+};
 use proptest::prelude::*;
 
 fn check_same(format: Format, input: &[u8], out_len: usize) -> Outcome {
-    let mut ours = sirocco::Decompressor::new(sirocco::Format::Deflate);
+    let mut ours = SiroccoDecoders::new();
     let mut theirs = ReferenceDecompressor::new();
     let a = sirocco_decompress(&mut ours, format, input, out_len);
     let b = theirs.decompress(format, input, out_len);
-    assert_eq!(
-        a,
-        b,
-        "{format:?}, {} input bytes, out_len {out_len}",
-        input.len()
-    );
+    let what = format!("{format:?}, {} input bytes, out_len {out_len}", input.len());
+    assert_agree(&a, &b, &what);
     a
 }
 
 #[test]
 fn corpus_round_trips_at_every_level() {
-    let mut d = sirocco::Decompressor::new(sirocco::Format::Deflate);
+    let mut d = SiroccoDecoders::new();
     for s in compare::corpus() {
         for level in 0..=12 {
             for format in Format::ALL {
@@ -148,7 +147,7 @@ proptest! {
     fn round_trips(data in mixed_data(), level in 0i32..=12, f in 0usize..3) {
         let format = Format::ALL[f];
         let c = reference_compress(format, level, &data);
-        let mut d = sirocco::Decompressor::new(sirocco::Format::Deflate);
+        let mut d = SiroccoDecoders::new();
         prop_assert_eq!(
             sirocco_decompress(&mut d, format, &c, data.len()),
             Outcome::Ok(c.len(), data)
@@ -200,7 +199,7 @@ proptest! {
         if !want.is_empty() {
             prop_assert_eq!(
                 sirocco::decompress(format.ff(), &c, want.len() - 1),
-                Err(sirocco::DecompressError::InsufficientSpace)
+                Err(sirocco::inflate::Error::InsufficientSpace)
             );
         }
     }

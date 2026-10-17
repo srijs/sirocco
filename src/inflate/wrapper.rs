@@ -1,7 +1,7 @@
 //! The zlib (RFC 1950) and gzip (RFC 1952) headers and trailers around a
-//! DEFLATE stream, shared by the one-shot and streaming decompressors.
+//! DEFLATE stream, shared by the streaming and `Vec` decoders.
 
-use super::DecompressError;
+use super::Error;
 use crate::Format;
 
 const FHCRC: u8 = 0x02;
@@ -64,8 +64,8 @@ impl HeaderParser {
         format: Format,
         input: &[u8],
         ip: &mut usize,
-    ) -> Result<bool, DecompressError> {
-        let bad = Err(DecompressError::BadData);
+    ) -> Result<bool, Error> {
+        let bad = Err(Error::BadData);
         loop {
             match self.field {
                 Field::Done => return Ok(true),
@@ -143,7 +143,7 @@ impl HeaderParser {
 
 /// Whether `hdr` is a zlib header (CMF and FLG) that this crate reads:
 /// Deflate with at most a 32 KiB window, no preset dictionary.
-fn zlib_header_ok(hdr: [u8; 2]) -> bool {
+pub(super) fn zlib_header_ok(hdr: [u8; 2]) -> bool {
     let hdr = u16::from_be_bytes(hdr);
     let cm = (hdr >> 8) & 0xF;
     let cinfo = hdr >> 12;
@@ -155,22 +155,23 @@ fn zlib_header_ok(hdr: [u8; 2]) -> bool {
 /// starts, and the furthest it can end: before room for the trailer.
 /// `input` must hold the whole header. zlib's fixed 2 bytes skip the general
 /// parser, which matters for streams as small as most git objects.
-pub(super) fn body_bounds(format: Format, input: &[u8]) -> Result<(usize, usize), DecompressError> {
+#[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+pub(super) fn body_bounds(format: Format, input: &[u8]) -> Result<(usize, usize), Error> {
     let body_end = input
         .len()
         .checked_sub(trailer_len(format))
-        .ok_or(DecompressError::BadData)?;
+        .ok_or(Error::BadData)?;
     let header = &input[..body_end];
     let start = match format {
         Format::Deflate => 0,
         Format::Zlib => match header.first_chunk() {
             Some(&hdr) if zlib_header_ok(hdr) => 2,
-            _ => return Err(DecompressError::BadData),
+            _ => return Err(Error::BadData),
         },
         Format::Gzip => {
             let mut pos = 0;
             if !HeaderParser::new().parse(format, header, &mut pos)? {
-                return Err(DecompressError::BadData);
+                return Err(Error::BadData);
             }
             pos
         }
@@ -215,7 +216,6 @@ impl Check {
 
     /// A check of only the length field of the trailer (gzip's ISIZE), for
     /// output that is counted with [`count`](Self::count) rather than seen.
-    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     pub(super) const fn len_only(format: Format) -> Self {
         Check {
             len_only: true,
@@ -241,14 +241,15 @@ impl Check {
 
     /// Checks the trailer at `input[pos..]`, which must hold all of it.
     /// Returns where it ends.
-    pub(super) fn verify_at(&self, input: &[u8], pos: usize) -> Result<usize, DecompressError> {
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    pub(super) fn verify_at(&self, input: &[u8], pos: usize) -> Result<usize, Error> {
         let end = pos + trailer_len(self.format);
         self.verify(&input[pos..end])?;
         Ok(end)
     }
 
     /// Checks the trailer, `trailer_len(format)` bytes.
-    pub(super) fn verify(&self, t: &[u8]) -> Result<(), DecompressError> {
+    pub(super) fn verify(&self, t: &[u8]) -> Result<(), Error> {
         let word = |i: usize| [t[i], t[i + 1], t[i + 2], t[i + 3]];
         let ok = match self.format {
             Format::Deflate => true,
@@ -261,7 +262,7 @@ impl Check {
         if ok {
             Ok(())
         } else {
-            Err(DecompressError::ChecksumMismatch)
+            Err(Error::ChecksumMismatch)
         }
     }
 }

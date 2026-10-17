@@ -12,7 +12,7 @@ pub enum Mode {
     /// [`OUT_CHUNK`]-byte pieces of output, as a `Read` adapter would.
     Stream,
     /// Finding each stream's end and length without its output
-    /// (`StreamMeasurer`), fed [`IN_CHUNK`]-byte pieces as gitoxide's pack
+    /// (`inflate::Scanner`), fed [`IN_CHUNK`]-byte pieces as gitoxide's pack
     /// indexing does. zlib-rs inflates into a scratch buffer instead.
     Measure,
 }
@@ -62,10 +62,141 @@ pub trait Inflater {
 ///
 /// The suite's runner (see `scripts/bench.sh`) uses this on a copy of a base
 /// revision whose package is renamed `sirocco_base`, so the base and the
-/// working tree are timed in one binary. The base needs the API of
-/// `StreamMeasurer` (sirocco after PR #29).
+/// working tree are timed in one binary. The base needs the `inflate`
+/// module's API; [`sirocco_v01_inflater`] covers bases from before it.
 #[macro_export]
 macro_rules! sirocco_inflater {
+    ($ty:ident, $name:literal, $krate:ident) => {
+        /// sirocco as an [`Inflater`]($crate::suite::Inflater).
+        #[derive(Debug)]
+        pub struct $ty {
+            decoders: [Box<$krate::inflate::Decoder>; 3],
+            scanners: [Box<$krate::inflate::Scanner>; 3],
+            /// [`Mode::Stream`]($crate::suite::Mode::Stream)'s buffer, sized
+            /// as `inflate::Reader`'s.
+            buf: Vec<u8>,
+        }
+
+        impl $ty {
+            const FORMATS: [$krate::Format; 3] = [
+                $krate::Format::Deflate,
+                $krate::Format::Zlib,
+                $krate::Format::Gzip,
+            ];
+
+            #[must_use]
+            pub fn new() -> Self {
+                $ty {
+                    decoders: Self::FORMATS.map(|f| Box::new($krate::inflate::Decoder::new(f))),
+                    scanners: Self::FORMATS.map(|f| Box::new($krate::inflate::Scanner::new(f))),
+                    buf: vec![0; 256 << 10],
+                }
+            }
+
+            fn index(format: $crate::Format) -> usize {
+                match format {
+                    $crate::Format::Deflate => 0,
+                    $crate::Format::Zlib => 1,
+                    $crate::Format::Gzip => 2,
+                }
+            }
+        }
+
+        impl Default for $ty {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl $crate::suite::Inflater for $ty {
+            fn name(&self) -> &'static str {
+                $name
+            }
+
+            fn supports(&self, _mode: $crate::suite::Mode) -> bool {
+                true
+            }
+
+            fn run(
+                &mut self,
+                mode: $crate::suite::Mode,
+                case: &$crate::suite::Case,
+                out: &mut [u8],
+            ) -> usize {
+                use $crate::suite::{Mode, IN_CHUNK, OUT_CHUNK};
+                let f = Self::index(case.format);
+                let mut total = 0;
+                match mode {
+                    Mode::OneShot => {
+                        let d = &mut self.decoders[f];
+                        for s in &case.streams {
+                            let p = d
+                                .decompress(
+                                    &case.input[s.input.clone()],
+                                    &mut out[s.output.clone()],
+                                    true,
+                                )
+                                .expect("sirocco one-shot");
+                            assert!(p.done, "sirocco one-shot");
+                            total += p.output.len();
+                        }
+                    }
+                    Mode::Stream => {
+                        // Copy out in `OUT_CHUNK` pieces, as `Read` would.
+                        let d = &mut self.decoders[f];
+                        for s in &case.streams {
+                            let input = &case.input[s.input.clone()];
+                            let out = &mut out[s.output.clone()];
+                            let (mut ip, mut op) = (0, 0);
+                            loop {
+                                let end = (ip + IN_CHUNK).min(input.len());
+                                let p = d
+                                    .decompress(&input[ip..end], &mut self.buf, end == input.len())
+                                    .expect("sirocco stream");
+                                ip += p.consumed;
+                                for piece in p.output.chunks(OUT_CHUNK) {
+                                    out[op..op + piece.len()].copy_from_slice(piece);
+                                    op += piece.len();
+                                }
+                                if p.done {
+                                    break;
+                                }
+                                if p.full {
+                                    d.make_room(&mut self.buf);
+                                }
+                            }
+                            total += op;
+                        }
+                    }
+                    Mode::Measure => {
+                        let m = &mut self.scanners[f];
+                        for s in &case.streams {
+                            let input = &case.input[s.input.clone()];
+                            let mut ip = 0;
+                            loop {
+                                let end = (ip + IN_CHUNK).min(input.len());
+                                let done = m
+                                    .scan(&input[ip..end], end == input.len())
+                                    .expect("sirocco scan");
+                                if done.is_some() {
+                                    break;
+                                }
+                                ip = end;
+                            }
+                            total += m.total_out() as usize;
+                        }
+                    }
+                }
+                total
+            }
+        }
+    };
+}
+
+/// [`sirocco_inflater`] for bases with sirocco 0.1's API (after PR #29).
+/// `scripts/bench.sh` picks it for bases without `src/inflate`.
+#[macro_export]
+macro_rules! sirocco_v01_inflater {
     ($ty:ident, $name:literal, $krate:ident) => {
         /// sirocco as an [`Inflater`]($crate::suite::Inflater).
         #[derive(Debug)]

@@ -91,9 +91,12 @@ if [ -n "$base" ]; then
   # `--cfg sirocco_no_bmi2` switch BMI2 off in bases older than that cfg.
   sed -i.orig -e 's/^name = "sirocco"$/name = "sirocco_base"/' \
     -e '/^members = /d' "$bench/base/Cargo.toml"
-  sed -i.orig 's/if std::is_x86_feature_detected!("bmi2")/if !cfg!(sirocco_no_bmi2) \&\& std::is_x86_feature_detected!("bmi2")/' \
-    "$bench/base/src/decompress/mod.rs"
-  rm -f "$bench/base/Cargo.toml.orig" "$bench/base/src/decompress/mod.rs.orig"
+  if [ -f "$bench/base/src/decompress/mod.rs" ]; then
+    sed -i.orig 's/if std::is_x86_feature_detected!("bmi2")/if !cfg!(sirocco_no_bmi2) \&\& std::is_x86_feature_detected!("bmi2")/' \
+      "$bench/base/src/decompress/mod.rs"
+    rm -f "$bench/base/src/decompress/mod.rs.orig"
+  fi
+  rm -f "$bench/base/Cargo.toml.orig"
   if ! grep -q sirocco_no_bmi2 "$bench/base/Cargo.toml"; then
     awk '{ print } /^\[workspace\.lints\.rust\]$/ {
       print "unexpected_cfgs = { level = \"warn\", check-cfg = [\"cfg(sirocco_no_bmi2)\"] }" }' \
@@ -106,11 +109,13 @@ if [ -n "$base" ]; then
     exit 1
   fi
   base_dep='sirocco_base = { path = "../base" }'
-  main='compare::sirocco_inflater!(Base, "base", sirocco_base);
+  # Bases from before the `inflate` module have sirocco 0.1's API.
+  if [ -d "$bench/base/src/inflate" ]; then inflater=sirocco_inflater; else inflater=sirocco_v01_inflater; fi
+  main="compare::$inflater!(Base, \"base\", sirocco_base);
 
 fn main() {
     compare::suite::main(vec![Box::new(Base::new())]);
-}'
+}"
 else
   base_rev=""
   base_dep=""

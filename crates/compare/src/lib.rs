@@ -190,12 +190,14 @@ pub fn libdeflate_decompress_into(data: &[u8], out: &mut [u8]) {
 }
 
 pub fn sirocco_decompress_into(data: &[u8], out: &mut [u8]) {
-    let r = sirocco::Decompressor::new(sirocco::Format::Deflate)
-        .decompress_into(data, out)
+    let len = out.len();
+    let p = sirocco::inflate::Decoder::new(sirocco::Format::Deflate)
+        .decompress(data, out, true)
         .unwrap();
+    assert!(p.done, "sirocco didn't finish");
     assert_eq!(
-        r.written,
-        out.len(),
+        p.output.len(),
+        len,
         "sirocco decompressed to the wrong size"
     );
 }
@@ -293,6 +295,32 @@ pub enum Outcome {
     Ok(usize, Vec<u8>),
     BadData,
     InsufficientSpace,
+    /// The input ended early (only sirocco tells this apart).
+    Truncated,
+}
+
+impl Outcome {
+    /// Whether sirocco's outcome agrees with libdeflate's. libdeflate reports
+    /// truncation as bad data or lack of room, so
+    /// [`Truncated`](Outcome::Truncated) agrees with either.
+    #[must_use]
+    pub fn agrees_with(&self, reference: &Outcome) -> bool {
+        match self {
+            Outcome::Truncated => {
+                matches!(reference, Outcome::BadData | Outcome::InsufficientSpace)
+            }
+            _ => self == reference,
+        }
+    }
+}
+
+/// Panics unless [`Outcome::agrees_with`].
+#[track_caller]
+pub fn assert_agree(ours: &Outcome, theirs: &Outcome, what: &dyn std::fmt::Display) {
+    assert!(
+        ours.agrees_with(theirs),
+        "sirocco {ours:?} vs libdeflate {theirs:?}: {what}"
+    );
 }
 
 /// libdeflate's decompressor, called through `libdeflate-sys` so the
@@ -356,52 +384,82 @@ impl Drop for ReferenceDecompressor {
     }
 }
 
-/// Decompresses with sirocco into an `out_len`-byte buffer.
+/// A sirocco decoder per [`Format`].
+#[derive(Debug)]
+pub struct SiroccoDecoders([Box<sirocco::inflate::Decoder>; 3]);
+
+impl SiroccoDecoders {
+    #[must_use]
+    pub fn new() -> Self {
+        SiroccoDecoders(Format::ALL.map(|f| Box::new(sirocco::inflate::Decoder::new(f.ff()))))
+    }
+
+    /// The decoder for `format`.
+    pub fn get(&mut self, format: Format) -> &mut sirocco::inflate::Decoder {
+        let i = Format::ALL.iter().position(|&f| f == format).unwrap();
+        &mut self.0[i]
+    }
+}
+
+impl Default for SiroccoDecoders {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Decompresses with sirocco in one call into an `out_len`-byte buffer.
 pub fn sirocco_decompress(
-    d: &mut sirocco::Decompressor,
+    d: &mut SiroccoDecoders,
     format: Format,
     input: &[u8],
     out_len: usize,
 ) -> Outcome {
     let mut out = vec![0u8; out_len];
-    d.set_format(format.ff());
-    match d.decompress_into(input, &mut out) {
-        Ok(r) => {
-            out.truncate(r.written);
-            Outcome::Ok(r.consumed, out)
+    let d = d.get(format);
+    d.reset();
+    match d.decompress(input, &mut out, true) {
+        Ok(p) if p.done => {
+            let (consumed, written) = (p.consumed, p.output.len());
+            out.truncate(written);
+            Outcome::Ok(consumed, out)
         }
-        // libdeflate reports a bad checksum as bad data.
-        Err(sirocco::DecompressError::BadData | sirocco::DecompressError::ChecksumMismatch) => {
-            Outcome::BadData
-        }
-        Err(sirocco::DecompressError::InsufficientSpace) => Outcome::InsufficientSpace,
-        Err(e) => panic!("unexpected error {e:?}"),
+        Ok(_) => Outcome::InsufficientSpace,
+        Err(e) => error_outcome(e),
     }
 }
 
-/// Decompresses `input` by handing it over in pieces of the `ins` sizes and
-/// taking output in pieces of the `outs` sizes (both cycled).
-pub fn sirocco_stream(format: Format, input: &[u8], ins: &[usize], outs: &[usize]) -> Outcome {
-    let mut d = sirocco::StreamDecompressor::new(format.ff());
-    let (mut ip, mut out, mut buf) = (0usize, Vec::new(), vec![0; 1 << 17]);
+/// The outcome for a sirocco error.
+fn error_outcome(e: sirocco::inflate::Error) -> Outcome {
+    match e {
+        // libdeflate reports a bad checksum as bad data.
+        sirocco::inflate::Error::BadData | sirocco::inflate::Error::ChecksumMismatch => {
+            Outcome::BadData
+        }
+        sirocco::inflate::Error::Truncated => Outcome::Truncated,
+        e => panic!("unexpected error {e:?}"),
+    }
+}
+
+/// Decompresses `input` in pieces of the `ins` sizes (cycled) through one
+/// buffer of `buf_len` bytes (at least 64 KiB), making room when it's full.
+pub fn sirocco_stream(format: Format, input: &[u8], ins: &[usize], buf_len: usize) -> Outcome {
+    let mut d = sirocco::inflate::Decoder::new(format.ff());
+    let buf_len = buf_len.max(64 << 10);
+    let (mut ip, mut out, mut buf) = (0usize, Vec::new(), vec![0; buf_len]);
     for step in 0.. {
         let end = ip.saturating_add(ins[step % ins.len()]).min(input.len());
-        let n = outs[step % outs.len()];
-        match d.decompress(&input[ip..end], &mut buf[..n], end == input.len()) {
+        match d.decompress(&input[ip..end], &mut buf, end == input.len()) {
             Ok(p) => {
                 ip += p.consumed;
-                out.extend_from_slice(&buf[..p.written]);
-                if p.status == sirocco::StreamStatus::Done {
+                out.extend_from_slice(p.output);
+                if p.done {
                     return Outcome::Ok(ip, out);
                 }
+                if p.full {
+                    d.make_room(&mut buf);
+                }
             }
-            // libdeflate reports a bad checksum and a cut-off stream as bad data.
-            Err(
-                sirocco::DecompressError::BadData
-                | sirocco::DecompressError::ChecksumMismatch
-                | sirocco::DecompressError::Truncated,
-            ) => return Outcome::BadData,
-            Err(e) => panic!("unexpected {e:?}"),
+            Err(e) => return error_outcome(e),
         }
     }
     unreachable!()

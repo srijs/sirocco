@@ -24,9 +24,9 @@ fn bench(c: &mut Criterion) {
                 // Throughput in uncompressed bytes, like libdeflate's benchmark.
                 g.throughput(Throughput::Bytes(s.data.len() as u64));
 
-                let mut d = sirocco::Decompressor::new(format.ff());
+                let mut d = Box::new(sirocco::inflate::Decoder::new(format.ff()));
                 g.bench_with_input(BenchmarkId::new("sirocco", &id), &compressed, |b, c| {
-                    b.iter(|| d.decompress_into(c, &mut out));
+                    b.iter(|| d.decompress(c, &mut out, true).map(|p| p.done));
                 });
 
                 let mut d = libdeflater::Decompressor::new();

@@ -3,7 +3,7 @@
 //! Compresses arbitrary bytes with libdeflate at every level and checks that
 //! sirocco decompresses them back.
 
-use compare::{sirocco_decompress, reference_compress, Format, Outcome};
+use compare::{reference_compress, sirocco_decompress, Format, Outcome, SiroccoDecoders};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -11,7 +11,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let level = i32::from(level % 13);
-    let mut d = sirocco::Decompressor::new(sirocco::Format::Deflate);
+    let mut d = SiroccoDecoders::new();
     for format in Format::ALL {
         let c = reference_compress(format, level, data);
         assert_eq!(

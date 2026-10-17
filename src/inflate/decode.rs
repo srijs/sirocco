@@ -8,7 +8,7 @@
 //! derivation of the bit-budget constants below.
 
 use super::tables::*;
-use super::DecompressError;
+use super::Error;
 
 type BitBuf = usize;
 
@@ -188,13 +188,13 @@ impl Cursor {
 /// Where a decode that paused stopped, so that it can carry on later. It
 /// points just before the symbol (or block header) that didn't fit in the
 /// output, or that needed more input than there was, so no output from it was
-/// written.
+/// written. A match cut off by the end of the output is the exception: it
+/// points after the match, with the rest in `match_left`.
 ///
 /// The bit buffer normally holds fewer than 8 bits, from the byte just before
 /// `in_pos`, so all input before `in_pos` is consumed and decoding can carry
 /// on from a different buffer that continues the input at `in_pos`.
 #[derive(Clone, Debug)]
-#[cfg_attr(not(feature = "alloc"), allow(dead_code))]
 pub(super) struct Resume {
     /// Holds implicit zero bytes only when some were already consumed, which
     /// only a decode without more input to come carries on from (to the
@@ -205,17 +205,26 @@ pub(super) struct Resume {
     in_block: Option<bool>,
     /// Inside a stored block, the bytes of it still to copy (at a byte
     /// boundary, with no bits held); 0 inside a Huffman block, whose decode
-    /// tables are still in the `Decompressor`.
+    /// tables are still in the decoder.
     stored_left: u16,
+    /// The rest of a match the output cut off, and its offset.
+    match_left: u16,
+    match_offset: u16,
     /// Whether it stopped for more input rather than more output space.
     need_input: bool,
-    /// Whether carrying on should stop again right after the header of the
-    /// next stored block, for the caller to copy its data. Set by the
-    /// caller; a pause clears it.
-    stop_at_stored: bool,
 }
 
 impl Resume {
+    /// A decode that hasn't started.
+    pub(super) const START: Resume = Resume {
+        at: Cursor::START,
+        in_block: None,
+        stored_left: 0,
+        match_left: 0,
+        match_offset: 0,
+        need_input: false,
+    };
+
     /// A resume point at `at`. Unless implicit zero bytes were consumed
     /// already (bad data, which more input never resumes from), it gives
     /// back the whole bytes in the bit buffer, so that it holds at most 7
@@ -230,23 +239,8 @@ impl Resume {
         Resume {
             at,
             in_block,
-            stored_left: 0,
             need_input,
-            stop_at_stored: false,
-        }
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl Resume {
-    /// A decode that hasn't started: at a block boundary, with no bits held.
-    pub(super) fn start() -> Self {
-        Resume {
-            at: Cursor::START,
-            in_block: None,
-            stored_left: 0,
-            need_input: false,
-            stop_at_stored: false,
+            ..Resume::START
         }
     }
 
@@ -276,39 +270,10 @@ impl Resume {
     pub(super) fn needs_input(&self) -> bool {
         self.need_input
     }
-
-    /// The bytes still to copy when stopped inside a stored block, whose
-    /// data starts at the input position.
-    pub(super) fn stored_left(&self) -> Option<usize> {
-        (self.stored_left > 0).then_some(self.stored_left.into())
-    }
-
-    /// Moves past `n` bytes of the stored block it stopped in, which the
-    /// caller copied. Returns whether that finished the stream.
-    pub(super) fn skip_stored(&mut self, n: usize) -> bool {
-        let left = usize::from(self.stored_left);
-        assert!(n <= left, "past the stored block");
-        self.at.in_pos += n;
-        self.at.out_pos += n;
-        self.need_input = false;
-        self.stored_left = (left - n) as u16;
-        if self.stored_left > 0 {
-            return false;
-        }
-        self.in_block.take() == Some(true)
-    }
-
-    /// Makes carrying on stop right after the next stored block header,
-    /// with [`stored_left`](Self::stored_left) set, instead of copying it.
-    pub(super) fn set_stop_at_stored(&mut self, stop: bool) {
-        self.stop_at_stored = stop;
-    }
 }
 
 /// How a decode call ended, short of an error.
 #[derive(Debug)]
-// Without `alloc` there is no growing output to resume into.
-#[cfg_attr(not(feature = "alloc"), allow(dead_code))]
 pub(super) enum Status {
     /// The stream ended: input bytes consumed and output bytes written.
     Done(usize, usize),
@@ -709,14 +674,16 @@ fn copy_match_slow(output: &mut [u8], dst: usize, offset: usize, length: usize) 
 /// finds where the stream ends and how long its output is, up to `out_len`.
 /// With `WRITE`, `out_len` is ignored.
 ///
-/// With `RESUMABLE`, running out of output space returns [`Status::Full`]
-/// instead of an error, and `resume` carries on from where an earlier call
-/// with the same tables stopped: `input` must continue the stream at the
-/// resume point's input position, `output` must hold the output written so
-/// far (at least its last 32 KiB) before its output position, and the
-/// tables must not have been used since. Without it, `resume` must be
-/// `None`; keeping track of where to resume costs a few percent of speed, so
-/// the fixed-buffer path doesn't.
+/// A full output returns [`Status::Full`] with the output filled completely
+/// (a match that doesn't fit is split). Input that ends early is
+/// [`Truncated`](Error::Truncated).
+///
+/// With `RESUMABLE`, `resume` carries on from where an earlier call with the
+/// same tables stopped: `input` must continue the stream at the resume
+/// point's input position, `output` must hold the output written so far (at
+/// least its last 32 KiB) before its output position, and the tables must
+/// not have been used since. Without it, `resume` must be `None` and the
+/// input all there; its pauses can be carried on from with `RESUMABLE`.
 ///
 /// With `RESUMABLE` and `more_input`, `input` may be followed by more of the
 /// stream, so instead of reading past its end (as implicit zero bytes) the
@@ -732,7 +699,7 @@ pub(super) fn run<const RESUMABLE: bool, const WRITE: bool>(
     out_len: usize,
     resume: Option<&Resume>,
     more_input: bool,
-) -> Result<Status, DecompressError> {
+) -> Result<Status, Error> {
     #[cfg(all(target_arch = "x86_64", not(target_feature = "bmi2"), feature = "std"))]
     {
         if !cfg!(sirocco_no_bmi2) && std::is_x86_feature_detected!("bmi2") {
@@ -780,7 +747,7 @@ fn run_bmi2<const RESUMABLE: bool, const WRITE: bool>(
     out_len: usize,
     resume: Option<&Resume>,
     more_input: bool,
-) -> Result<Status, DecompressError> {
+) -> Result<Status, Error> {
     // The closure inherits BMI2 from this function, so it can call
     // `fastloop_bmi2` safely.
     decompress::<RESUMABLE, WRITE>(
@@ -822,8 +789,8 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
     resume: Option<&Resume>,
     more_input: bool,
     fastloop: impl Fn(&Tables, &mut FastState<'_>, bool) -> FastExit,
-) -> Result<Status, DecompressError> {
-    use DecompressError::*;
+) -> Result<Status, Error> {
+    use Error::*;
 
     let resume = if RESUMABLE { resume } else { None };
     let out_len = if WRITE { output.len() } else { out_len };
@@ -832,7 +799,26 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
     assert!(c.in_pos <= input.len() && c.out_pos <= out_len);
     let mut resume_in_block = resume.and_then(|r| r.in_block);
     let mut resume_stored = resume.map_or(0, |r| r.stored_left);
-    let stop_at_stored = RESUMABLE && WRITE && resume.is_some_and(|r| r.stop_at_stored);
+
+    // Finish a match the output cut off last time.
+    if let Some(r) = resume.filter(|r| r.match_left > 0) {
+        let (left, offset) = (usize::from(r.match_left), usize::from(r.match_offset));
+        if offset > c.out_pos {
+            return Err(BadData);
+        }
+        let n = left.min(out_len - c.out_pos);
+        if WRITE {
+            copy_match_slow(output, c.out_pos, offset, n);
+        }
+        c.out_pos += n;
+        if n < left {
+            return Ok(Status::Full(Resume {
+                at: c,
+                match_left: (left - n) as u16,
+                ..r.clone()
+            }));
+        }
+    }
 
     // Returns a resume point at the cursor `$at`, at the start of the
     // current symbol (or, with `in_block` None, the current block).
@@ -853,11 +839,12 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
     }
 
     // Pauses at `$at` when the output is full. Nothing of that symbol or
-    // block may have been written yet.
+    // block may have been written yet. If bits came from past the end of the
+    // input, it is truncated instead.
     macro_rules! full {
         ($at:expr, $in_block:expr) => {{
-            if !RESUMABLE {
-                return Err(InsufficientSpace);
+            if c.consumed_overread() {
+                truncated!();
             }
             pause!($at, $in_block, false)
         }};
@@ -868,13 +855,23 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
     // which may stand in for input yet to come.
     let mut last = (c, resume_in_block);
 
-    // With more input to come, errors seen after reading past the end of
-    // `input` may be down to the implicit zero bytes, so pause at the last
-    // snapshot instead: the error comes back after resuming if it is real.
+    // Out of input: with more to come, pause at the last snapshot.
+    macro_rules! truncated {
+        () => {{
+            if more_input {
+                pause!(last.0, last.1, true);
+            }
+            return Err(Truncated);
+        }};
+    }
+
+    // An error after reading past the end of `input` may be down to the
+    // implicit zero bytes, so it counts as truncation. With more input to
+    // come, a real error comes back after resuming.
     macro_rules! bad {
         () => {{
-            if more_input && c.overread > 0 {
-                pause!(last.0, last.1, true);
+            if c.overread > 0 {
+                truncated!();
             }
             return Err(BadData);
         }};
@@ -912,10 +909,9 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
         if more_input && c.consumed_overread() {
             pause!(last.0, last.1, true);
         }
-        let block_start = c;
         last = (c, resume_in_block);
         let is_final_block;
-        // With `RESUMABLE`, the bytes of a stored block still to copy.
+        // A stored block's bytes still to copy, if short of input or room.
         let mut stored = None;
         if let Some(f) = resume_in_block.take() {
             // Resuming inside a block: a stored one, or a Huffman one whose
@@ -1018,10 +1014,7 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                 c.align_to_byte();
 
                 let Some(header) = input.get(c.in_pos..c.in_pos + 4) else {
-                    if more_input {
-                        pause!(block_start, None, true);
-                    }
-                    bad!();
+                    truncated!();
                 };
                 let len = u16::from_le_bytes([header[0], header[1]]);
                 let nlen = u16::from_le_bytes([header[2], header[3]]);
@@ -1031,7 +1024,7 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                 let len = len as usize;
                 let data = input.get(c.in_pos + 4..c.in_pos + 4 + len);
                 match data {
-                    Some(data) if len <= out_len - c.out_pos && !stop_at_stored => {
+                    Some(data) if len <= out_len - c.out_pos => {
                         if WRITE {
                             output[c.out_pos..c.out_pos + len].copy_from_slice(data);
                         }
@@ -1043,21 +1036,10 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                         }
                         continue;
                     }
-                    // Short of input or room, or asked to stop: copied below
-                    // as far as there is input and room for, if at all.
-                    _ if RESUMABLE => {
+                    // Short of input or room: copied below.
+                    _ => {
                         c.in_pos += 4;
                         stored = Some(len);
-                        if stop_at_stored && len > 0 {
-                            pause_stored!(len, is_final_block, false);
-                        }
-                    }
-                    _ => {
-                        if len > out_len - c.out_pos {
-                            // Nothing of this block has been written yet.
-                            full!(block_start, None);
-                        }
-                        bad!();
                     }
                 }
             } else {
@@ -1071,8 +1053,7 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
         }
 
         if let Some(left) = stored {
-            // A stored block, when resumable: copy what there is input and
-            // room for, and pause inside the block if that isn't all of it.
+            // Copy what fits, pausing inside the block if that isn't all.
             let n = left.min(input.len() - c.in_pos).min(out_len - c.out_pos);
             if WRITE {
                 output[c.out_pos..c.out_pos + n].copy_from_slice(&input[c.in_pos..c.in_pos + n]);
@@ -1082,7 +1063,7 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
             if n < left {
                 if c.out_pos < out_len {
                     if !more_input {
-                        bad!();
+                        return Err(Truncated);
                     }
                     pause_stored!(left - n, is_final_block, true);
                 }
@@ -1154,7 +1135,8 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                     break 'block_done;
                 }
                 let length = entry_value(entry, saved_bitbuf);
-                if length > out_len - c.out_pos {
+                let room = out_len - c.out_pos;
+                if room == 0 {
                     full!(symbol_start, Some(is_final_block));
                 }
 
@@ -1173,7 +1155,26 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                 c.bits.consume_entry(entry);
 
                 if offset > c.out_pos {
+                    if length > room {
+                        // Out of room first, as libdeflate.
+                        full!(symbol_start, Some(is_final_block));
+                    }
                     bad!();
+                }
+                if length > room {
+                    // Copy what fits; the rest goes next call.
+                    if c.consumed_overread() {
+                        truncated!();
+                    }
+                    if WRITE {
+                        copy_match_slow(output, c.out_pos, offset, room);
+                    }
+                    c.out_pos += room;
+                    return Ok(Status::Full(Resume {
+                        match_left: (length - room) as u16,
+                        match_offset: offset as u16,
+                        ..Resume::new(c, Some(is_final_block), false)
+                    }));
                 }
                 if WRITE {
                     copy_match_slow(output, c.out_pos, offset, length);

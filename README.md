@@ -8,15 +8,15 @@ Fast DEFLATE, zlib and gzip decompression in pure Rust.
 - **Fast.** A table-driven decoder in the style of libdeflate's, about as fast
   as libdeflate on large inputs and faster on small ones, and 15-60% faster
   than zlib-rs (see [Performance](#performance)).
-- **One-shot or streaming.** Decompress a whole buffer in one call, or feed
-  input in pieces of any size to `StreamDecompressor` (or read from any
-  `BufRead` with `DecompressReader`) at nearly the same speed.
-- **Measuring.** `Decompressor::measure` and `StreamMeasurer` find where a
-  stream ends and how long its output is without writing it, for example to
-  walk a git pack.
+- **One-shot or streaming, with one API.** `inflate::Decoder` decompresses
+  a whole buffer in one call, or input in pieces of any size into a buffer
+  you own, at nearly the same speed. `inflate::Reader` reads from any
+  `BufRead`.
+- **Scanning.** `inflate::Scanner` finds where a stream ends and how long
+  its output is without writing it, for example to walk a git pack.
 - **Safe.** The decoder is safe Rust; the only `unsafe` is calling into
   code compiled for the CPU features detected at runtime.
-- **`no_std`.** The core API works without an allocator.
+- **`no_std`.** Decoding, streaming included, works without an allocator.
 - **Tested.** Differentially tested (with proptest) and fuzzed against
   libdeflate.
 
@@ -29,7 +29,7 @@ Does not support compression/deflating yet.
 
 ```toml
 [dependencies]
-sirocco = "0.1"
+sirocco = "0.2"
 ```
 
 ```rust
@@ -49,33 +49,46 @@ use std::{fs::File, io::{BufReader, Read}};
 
 fn main() -> std::io::Result<()> {
     let file = BufReader::new(File::open("data.gz")?);
-    let mut reader = sirocco::DecompressReader::new(sirocco::Format::Gzip, file);
+    let mut reader = sirocco::inflate::Reader::new(sirocco::Format::Gzip, file);
     let mut data = Vec::new();
     reader.read_to_end(&mut data)?;
     Ok(())
 }
 ```
 
-See the [documentation](https://docs.rs/sirocco) for reusing a
-`Decompressor`, decompressing into your own buffer and streaming.
+To decompress many buffers, reuse an `inflate::Decoder`. It writes into a
+buffer you own, takes input in one piece or many, and never allocates:
+
+```rust
+use sirocco::{inflate::Decoder, Format};
+
+# let compressed = [0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x00];
+let mut d = Decoder::new(Format::Deflate);
+let mut out = [0; 17];
+let p = d.decompress(&compressed, &mut out, true).unwrap();
+assert!(p.done);
+assert_eq!(p.output, b"hello hello hello");
+```
+
+See the [documentation](https://docs.rs/sirocco) for streaming through a
+buffer smaller than the output.
 
 ### Features
 
-- `std` (default): `DecompressReader` and other `std::io` integrations;
+- `std` (default): `inflate::Reader` and other `std::io` integrations;
   enables `alloc`.
-- `alloc`: everything that returns a `Vec`, `StreamDecompressor` and
-  `StreamMeasurer`.
+- `alloc`: `sirocco::decompress`, which returns a `Vec`.
 
-With `default-features = false`, `Decompressor::decompress_into` and
-`Decompressor::measure` still work.
+With `default-features = false`, `inflate::Decoder` and `inflate::Scanner`
+still work, streaming included.
 
 The minimum supported Rust version is 1.89.
 
 ### Limitations
 
 - zlib streams with a preset dictionary (`FDICT`) are rejected.
-- The `Vec` helpers read every member of a multi-member gzip file (as
-  `gzip -d` does); `decompress_into` and the streaming types read one member
+- `sirocco::decompress` reads every member of a multi-member gzip file (as
+  `gzip -d` does); `inflate::Decoder`, `Scanner` and `Reader` read one member
   at a time.
 
 ## Performance
@@ -108,10 +121,10 @@ libdeflate a great deal, and it remains the speed to beat.
 Much of sirocco is its own work, though:
 
 - **Streaming.** libdeflate decompresses whole buffers only. sirocco's
-  `StreamDecompressor`, `DecompressReader` and `StreamMeasurer` take input in
-  pieces of any size, resume mid-block, and copy stored blocks straight to
-  the caller's output.
-- **Measuring** a stream's end and length without writing its output.
+  `inflate::Decoder`, `Reader` and `Scanner` take input in pieces of any
+  size and resume mid-block, mid-match included, decoding straight into the
+  caller's buffer.
+- **Scanning** a stream's end and length without writing its output.
 - **Small inputs.** A fastloop for the tail of the output, decode tables for
   fixed-Huffman blocks built at compile time, a fast path for zlib headers,
   and table builds that skip unused symbols eight at a time make sirocco
