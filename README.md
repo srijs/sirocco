@@ -86,7 +86,8 @@ The minimum supported Rust version is 1.89.
 
 ### Limitations
 
-- zlib streams with a preset dictionary (`FDICT`) are rejected.
+- zlib streams with a preset dictionary (`FDICT`) are rejected, with
+  `inflate::Error::PresetDictionary`.
 - `sirocco::decompress` reads every member of a multi-member gzip file (as
   `gzip -d` does); `inflate::Decoder`, `Scanner` and `Reader` read one member
   at a time.

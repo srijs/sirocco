@@ -75,9 +75,7 @@ impl HeaderParser {
                         if !self.collect(input, ip, 2) {
                             return Ok(false);
                         }
-                        if !zlib_header_ok([self.buf[0], self.buf[1]]) {
-                            return bad;
-                        }
+                        zlib_header([self.buf[0], self.buf[1]])?;
                         self.field = Field::Done;
                     }
                     Format::Gzip => {
@@ -141,14 +139,20 @@ impl HeaderParser {
     }
 }
 
-/// Whether `hdr` is a zlib header (CMF and FLG) that this crate reads:
-/// Deflate with at most a 32 KiB window, no preset dictionary.
-pub(super) fn zlib_header_ok(hdr: [u8; 2]) -> bool {
+/// Checks a zlib header (CMF and FLG): Deflate with at most a 32 KiB window,
+/// and no preset dictionary, which isn't supported.
+pub(super) fn zlib_header(hdr: [u8; 2]) -> Result<(), Error> {
     let hdr = u16::from_be_bytes(hdr);
     let cm = (hdr >> 8) & 0xF;
     let cinfo = hdr >> 12;
     let fdict = (hdr >> 5) & 1;
-    hdr.is_multiple_of(31) && cm == 8 && cinfo <= 7 && fdict == 0
+    if !hdr.is_multiple_of(31) || cm != 8 || cinfo > 7 {
+        Err(Error::BadData)
+    } else if fdict != 0 {
+        Err(Error::PresetDictionary)
+    } else {
+        Ok(())
+    }
 }
 
 /// Where the DEFLATE body of the `format` stream at the start of `input`
@@ -165,8 +169,11 @@ pub(super) fn body_bounds(format: Format, input: &[u8]) -> Result<(usize, usize)
     let start = match format {
         Format::Deflate => 0,
         Format::Zlib => match header.first_chunk() {
-            Some(&hdr) if zlib_header_ok(hdr) => 2,
-            _ => return Err(Error::BadData),
+            Some(&hdr) => {
+                zlib_header(hdr)?;
+                2
+            }
+            None => return Err(Error::BadData),
         },
         Format::Gzip => {
             let mut pos = 0;

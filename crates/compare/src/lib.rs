@@ -431,10 +431,10 @@ pub fn sirocco_decompress(
 /// The outcome for a sirocco error.
 fn error_outcome(e: sirocco::inflate::Error) -> Outcome {
     match e {
-        // libdeflate reports a bad checksum as bad data.
-        sirocco::inflate::Error::BadData | sirocco::inflate::Error::ChecksumMismatch => {
-            Outcome::BadData
-        }
+        // libdeflate reports a bad checksum or a preset dictionary as bad data.
+        sirocco::inflate::Error::BadData
+        | sirocco::inflate::Error::ChecksumMismatch
+        | sirocco::inflate::Error::PresetDictionary => Outcome::BadData,
         sirocco::inflate::Error::Truncated => Outcome::Truncated,
         e => panic!("unexpected error {e:?}"),
     }

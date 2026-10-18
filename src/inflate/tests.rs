@@ -342,6 +342,33 @@ fn input_too_short_for_a_trailer_is_truncated() {
 }
 
 #[test]
+fn a_preset_dictionary_is_its_own_error() {
+    // A valid zlib header with FDICT set, then a dictionary id.
+    let input = [0x78, 0x20, 0, 0, 0, 0, 0x03, 0x00, 0, 0, 0, 1];
+    assert_eq!(
+        one_shot(Format::Zlib, &input, 10),
+        Err(Error::PresetDictionary)
+    );
+    assert_eq!(
+        stream(Format::Zlib, &input, &[1], 1 << 16),
+        Err(Error::PresetDictionary)
+    );
+    assert_eq!(
+        scan(Format::Zlib, &input, &[1]),
+        Err(Error::PresetDictionary)
+    );
+    assert_eq!(
+        crate::decompress(Format::Zlib, &input, 10),
+        Err(Error::PresetDictionary)
+    );
+    // The same bit in a header that is wrong anyway is just bad data.
+    assert_eq!(
+        one_shot(Format::Zlib, b"invalid zlib", 10),
+        Err(Error::BadData)
+    );
+}
+
+#[test]
 fn an_error_ends_the_stream() {
     let good = reference_compress(Format::Zlib, 6, b"good data");
     let mut bad = good.clone();

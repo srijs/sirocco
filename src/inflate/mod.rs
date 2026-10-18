@@ -48,6 +48,8 @@ pub enum Error {
     TrailingData,
     /// The input ended before the stream did.
     Truncated,
+    /// A zlib stream needs a preset dictionary, which isn't supported.
+    PresetDictionary,
     /// [`Decoder::decompress`]'s buffer has no room for the stream to go
     /// on: grow it or [make room](Decoder::make_room). A buffer shorter than
     /// the output it should hold is this too.
@@ -62,6 +64,7 @@ impl fmt::Display for Error {
             Error::InsufficientSpace => "decompressed data longer than the limit",
             Error::TrailingData => "unexpected data after the compressed stream",
             Error::Truncated => "compressed data ended early",
+            Error::PresetDictionary => "zlib stream needs a preset dictionary",
             Error::BufferFull => "the buffer has no room for the stream to go on",
         })
     }

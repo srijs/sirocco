@@ -2,7 +2,7 @@
 
 use super::decode::{self, Resume, Status};
 use super::tables::Tables;
-use super::wrapper::{trailer_len, zlib_header_ok, Check, HeaderParser};
+use super::wrapper::{trailer_len, zlib_header, Check, HeaderParser};
 use super::Error;
 use crate::Format;
 
@@ -185,8 +185,10 @@ impl<const WRITE: bool> Core<WRITE> {
             Format::Deflate => 0,
             // Skip the general parser: it shows on small git objects.
             Format::Zlib => match input[..body_end].first_chunk() {
-                Some(&hdr) if zlib_header_ok(hdr) => 2,
-                Some(_) => return Err(Error::BadData),
+                Some(&hdr) => {
+                    zlib_header(hdr)?;
+                    2
+                }
                 None => return Err(Error::Truncated),
             },
             Format::Gzip => {
