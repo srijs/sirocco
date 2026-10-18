@@ -103,6 +103,15 @@ fn scan(format: Format, c: &[u8], in_sizes: &[usize]) -> Result<(u64, usize), Er
     unreachable!()
 }
 
+/// Proptest cases per test: 256, or `SIROCCO_PROPTEST_CASES` at build time
+/// (CI lowers it for emulated targets).
+fn cases() -> u32 {
+    match option_env!("SIROCCO_PROPTEST_CASES") {
+        Some(n) => n.parse().expect("SIROCCO_PROPTEST_CASES is a number"),
+        None => 256,
+    }
+}
+
 fn data() -> impl Strategy<Value = Vec<u8>> {
     prop_oneof![
         prop::collection::vec(any::<u8>(), 0..2000),
@@ -783,7 +792,7 @@ fn resume_after_reading_past_the_end() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(ProptestConfig::with_cases(cases()))]
 
     #[test]
     fn chunked_matches_one_shot(
@@ -872,7 +881,7 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(ProptestConfig::with_cases(cases()))]
 
     /// Stopping before a literal, a match or a stored block and carrying on
     /// in a bigger buffer gives the same output as one big buffer.

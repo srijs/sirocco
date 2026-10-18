@@ -9,11 +9,15 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -23,31 +27,56 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       - name: Clippy (no_std)
         run: cargo clippy -p sirocco --no-default-features
+      - name: Clippy (alloc without std)
+        run: cargo clippy -p sirocco --no-default-features --features alloc
       - name: Clippy (AArch64 SIMD paths)
         run: cargo clippy -p sirocco --all-targets --target aarch64-unknown-linux-gnu
       - run: cargo check --manifest-path fuzz/Cargo.toml
+      - name: Documentation
+        run: cargo doc -p sirocco --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Package
+        run: cargo package -p sirocco
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the MSRV toolchain
+        run: rustup toolchain install 1.89 --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.89 check -p sirocco --lib --all-features
+      - run: cargo +1.89 check -p sirocco --lib --no-default-features
 
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   typos:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: crate-ci/typos@v1.51.1
 
   test:
+    name: test / ${{ matrix.os }} / ${{ matrix.rust }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        rust: [stable]
+        include:
+          - { os: ubuntu-latest, rust: beta }
+          - { os: ubuntu-latest, rust: nightly }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo test --workspace --release
@@ -56,17 +85,145 @@ jobs:
       - name: Benchmarks compile
         run: cargo bench --workspace --no-run
 
+  # The decoder alone on more targets: the compare crate links libdeflate,
+  # which these don't build.
+  target:
+    name: test / ${{ matrix.target }}${{ matrix.name && format(' / {0}', matrix.name) || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: i686-pc-windows-msvc }
+          - { os: windows-latest, target: x86_64-pc-windows-gnu }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+          - { os: ubuntu-latest, target: i686-unknown-linux-gnu, deps: gcc-multilib }
+          # GitHub's x86 runners have BMI2, so this runs the default loop.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, name: no BMI2, rustflags: --cfg sirocco_no_bmi2 }
+          # BMI2 at compile time, without the runtime check.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, name: BMI2 enabled, rustflags: -C target-feature=+bmi2 }
+    env:
+      RUSTFLAGS: -D warnings ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ matrix.name }}
+      - name: Install the cross toolchain
+        if: matrix.deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.deps }}
+      - run: cargo test -p sirocco --target ${{ matrix.target }}
+      - run: cargo test -p sirocco --release --target ${{ matrix.target }}
+
+  emulated:
+    name: emulated / ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: s390x big-endian, target: s390x-unknown-linux-gnu, deps: gcc-s390x-linux-gnu }
+          - { name: armv7 32-bit, target: armv7-unknown-linux-gnueabihf, deps: gcc-arm-linux-gnueabihf }
+    env:
+      # Emulation is slow: fewer proptest cases.
+      SIROCCO_PROPTEST_CASES: 24
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER: s390x-linux-gnu-gcc
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER: qemu-s390x -L /usr/s390x-linux-gnu
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUNNER: qemu-arm -L /usr/arm-linux-gnueabihf
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install QEMU and the cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user ${{ matrix.deps }}
+      - run: cargo test -p sirocco --release --target ${{ matrix.target }}
+
+  wasm:
+    name: test / wasm32-wasip1
+    runs-on: ubuntu-latest
+    env:
+      SIROCCO_PROPTEST_CASES: 64
+      CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir ${{ github.workspace }}::${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+      - run: cargo test -p sirocco --release --target wasm32-wasip1
+
+  cross:
+    name: cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            thumbv7em-none-eabi, thumbv6m-none-eabi, aarch64-unknown-none-softfloat,
+            x86_64-unknown-none, wasm32-unknown-unknown, riscv64gc-unknown-linux-gnu,
+            powerpc-unknown-linux-gnu, arm64ec-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: no_std, without and with alloc
+        run: |
+          for target in thumbv7em-none-eabi thumbv6m-none-eabi aarch64-unknown-none-softfloat x86_64-unknown-none wasm32-unknown-unknown; do
+            cargo check -p sirocco --lib --no-default-features --target "$target"
+            cargo check -p sirocco --lib --no-default-features --features alloc --target "$target"
+          done
+      - name: std
+        run: |
+          for target in riscv64gc-unknown-linux-gnu powerpc-unknown-linux-gnu arm64ec-pc-windows-msvc; do
+            cargo check -p sirocco --lib --target "$target"
+          done
+
   fuzz:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - run: cargo install cargo-fuzz --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - name: Fuzz each target briefly
         run: |
           for t in $(cargo fuzz list); do
             cargo fuzz run "$t" -- -max_total_time=60
+          done
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+  success:
+    name: CI success
+    runs-on: ubuntu-latest
+    needs: [lint, msrv, deny, typos, test, target, emulated, wasm, cross, fuzz]
+    if: always()
+    steps:
+      - name: Check that all jobs succeeded
+        run: |
+          for result in ${{ join(needs.*.result, ' ') }}; do
+            if [ "$result" != "success" ]; then
+              echo "A required job did not succeed: $result"
+              exit 1
+            fi
           done
