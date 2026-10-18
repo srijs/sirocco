@@ -847,6 +847,11 @@ proptest! {
             Err(Error::ChecksumMismatch) => prop_assert!(
                 matches!(scanned, Ok(_) | Err(Error::ChecksumMismatch)), "{:?}", scanned
             ),
+            // One-shot ends the body before the trailer; scanning can't, so a
+            // corrupt stream can be truncated to one and bad data to the other.
+            Err(e @ (Error::BadData | Error::Truncated)) => prop_assert!(
+                matches!(scanned, Err(Error::BadData | Error::Truncated)), "{:?} vs {:?}", e, scanned
+            ),
             Err(e) => prop_assert_eq!(scanned, Err(*e)),
             Ok((None, _)) => unreachable!(),
         }

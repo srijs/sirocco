@@ -26,7 +26,9 @@ crc32fast.workspace = true
 
 [dev-dependencies]
 miniz_oxide = "0.9"
-proptest = "1"
+# Without `fork` and `timeout`, which the tests don't use and which don't
+# build for wasm.
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
 
 [lib]
 bench = false
