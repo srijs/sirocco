@@ -2,7 +2,9 @@
 
 //! Decompresses arbitrary bytes with sirocco and libdeflate in all three
 //! formats and checks they agree on the outcome, the consumed input and the
-//! output.
+//! output, except where sirocco rejects a stream as zlib (zlib-rs) does, and
+//! that zlib accepts the raw DEFLATE streams sirocco does (see
+//! `compare::assert_agree`).
 
 use compare::{assert_agree, sirocco_decompress, Format, ReferenceDecompressor, SiroccoDecoders};
 use libfuzzer_sys::fuzz_target;
@@ -20,6 +22,9 @@ fuzz_target!(|data: &[u8]| {
         assert_agree(
             &sirocco_decompress(&mut ours, format, input, out_len),
             &theirs.decompress(format, input, out_len),
+            format,
+            input,
+            out_len,
             &format!("{format:?}"),
         );
     }

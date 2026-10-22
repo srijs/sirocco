@@ -314,13 +314,59 @@ impl Outcome {
     }
 }
 
-/// Panics unless [`Outcome::agrees_with`].
+/// Panics unless [`Outcome::agrees_with`], or sirocco rejected `input` and
+/// libdeflate (with an `out_len`-byte buffer) didn't, but zlib (zlib-rs)
+/// rejects it too: libdeflate is more lenient than zlib, and sirocco is as
+/// strict. For raw DEFLATE, also panics if sirocco accepted `input` and
+/// zlib doesn't, or decodes it differently. (The body of every format is raw
+/// DEFLATE, and in the others zlib checks more of the wrapper than sirocco
+/// and libdeflate do, such as a gzip header's CRC.)
 #[track_caller]
-pub fn assert_agree(ours: &Outcome, theirs: &Outcome, what: &dyn std::fmt::Display) {
+pub fn assert_agree(
+    ours: &Outcome,
+    theirs: &Outcome,
+    format: Format,
+    input: &[u8],
+    out_len: usize,
+    what: &dyn std::fmt::Display,
+) {
     assert!(
-        ours.agrees_with(theirs),
+        ours.agrees_with(theirs)
+            || (matches!(ours, Outcome::BadData | Outcome::Truncated)
+                && matches!(theirs, Outcome::Ok(..) | Outcome::InsufficientSpace)
+                && zlib_decompress(format, input, out_len).is_err()),
         "sirocco {ours:?} vs libdeflate {theirs:?}: {what}"
     );
+    if let (Format::Deflate, Outcome::Ok(_, out)) = (format, ours) {
+        let z = zlib_decompress(format, input, out_len);
+        assert!(
+            matches!(&z, Ok(Some(o)) if o == out),
+            "sirocco {ours:?} vs zlib-rs {z:?}: {what}"
+        );
+    }
+}
+
+/// Decompresses `input` with zlib (zlib-rs) into an `out_len`-byte buffer:
+/// the output if the stream ends, `None` if the buffer or the input runs out
+/// first, and an error if the data is bad.
+pub fn zlib_decompress(
+    format: Format,
+    input: &[u8],
+    out_len: usize,
+) -> Result<Option<Vec<u8>>, zlib_rs::InflateError> {
+    let mut z = match format {
+        Format::Deflate => zlib_rs::Inflate::new(false, 15),
+        Format::Zlib => zlib_rs::Inflate::new(true, 15),
+        Format::Gzip => zlib_rs::Inflate::new(true, 16 + 15),
+    };
+    let mut out = vec![0; out_len];
+    match z.decompress(input, &mut out, zlib_rs::InflateFlush::Finish)? {
+        zlib_rs::Status::StreamEnd => {
+            out.truncate(z.total_out() as usize);
+            Ok(Some(out))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// libdeflate's decompressor, called through `libdeflate-sys` so the

@@ -14,7 +14,7 @@ fn check_same(format: Format, input: &[u8], ins: &[usize], buf_len: usize) {
         "{format:?}, {} input bytes, ins {ins:?}, buffer {buf_len}",
         input.len()
     );
-    assert_agree(&ours, &theirs, &what);
+    assert_agree(&ours, &theirs, format, input, 4 << 20, &what);
 }
 
 /// From the smallest streaming buffer up.
