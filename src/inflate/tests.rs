@@ -724,6 +724,168 @@ fn last_valid_static_symbols_decode() {
     }
 }
 
+/// A raw DEFLATE stream of one dynamic block with litlen codeword lengths
+/// `litlen_lens` and offset codeword lengths `offset_lens`, sent as 4-bit
+/// precode codewords, then `body`: `(codeword, length)` pairs, sent MSB
+/// first, or `(bits, !length)` sent LSB first, for extra bits. Then `PAD`
+/// bytes.
+fn dynamic_block_stream(litlen_lens: &[u8], offset_lens: &[u8], body: &[(u32, u32)]) -> Vec<u8> {
+    const PERMUTATION: [usize; 19] = [
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+    ];
+    let mut w = BitWriter {
+        out: Vec::new(),
+        bits: 0,
+        n: 0,
+    };
+    w.put(1, 1); // final block
+    w.put(2, 2); // dynamic Huffman
+    w.put((litlen_lens.len() - 257) as u32, 5);
+    w.put((offset_lens.len() - 1) as u32, 5);
+    w.put(19 - 4, 4);
+    // A complete precode: lengths 0 - 15 as 4-bit codewords, which are the
+    // lengths themselves.
+    for sym in PERMUTATION {
+        w.put(if sym < 16 { 4 } else { 0 }, 3);
+    }
+    for &len in litlen_lens.iter().chain(offset_lens) {
+        w.put_code(u32::from(len), 4);
+    }
+    for &(v, n) in body {
+        if n > 32 {
+            w.put(v, !n);
+        } else {
+            w.put_code(v, n);
+        }
+    }
+    let mut c = w.finish();
+    c.extend_from_slice(&[0; PAD]);
+    c
+}
+
+/// The lengths of a litlen code of 258 symbols with codewords for only `a`
+/// (`0`), end of block (`10`) and length 3 (`11`).
+fn three_symbol_litlen_lens() -> Vec<u8> {
+    let mut lens = vec![0; 258];
+    lens[usize::from(b'a')] = 1;
+    lens[256] = 2;
+    lens[257] = 2;
+    lens
+}
+
+const LIT_A: (u32, u32) = (0, 1);
+const END: (u32, u32) = (0b10, 2);
+const LEN_3: (u32, u32) = (0b11, 2);
+
+/// Codes may be incomplete if they are empty or have a single 1-bit
+/// codeword, `0`. Their streams decode as long as they don't use a codeword
+/// the code lacks.
+#[test]
+fn incomplete_codes_decode() {
+    let litlen = three_symbol_litlen_lens();
+    let mut eob_only = vec![0; 257];
+    eob_only[256] = 1;
+    for (litlen, offset, body, out) in [
+        // One offset symbol, 0 (offset 1).
+        (
+            &litlen,
+            &[1][..],
+            &[LIT_A, LEN_3, (0, 1), END][..],
+            &b"aaaa"[..],
+        ),
+        // No offset symbols, and no matches.
+        (&litlen, &[0], &[LIT_A, END], b"a"),
+        // Only end of block.
+        (&eob_only, &[0], &[(0, 1)], b""),
+    ] {
+        let c = dynamic_block_stream(litlen, offset, body);
+        let used = c.len() - PAD;
+        assert_eq!(
+            one_shot(Format::Deflate, &c, 10),
+            Ok((Some(out.to_vec()), used))
+        );
+        assert_eq!(
+            stream(Format::Deflate, &c, &[1], 1 << 16),
+            Ok((out.to_vec(), used))
+        );
+        assert_eq!(miniz_oxide::inflate::decompress_to_vec(&c).unwrap(), out);
+    }
+}
+
+/// zlib rejects the codewords an incomplete code lacks; libdeflate decodes
+/// them as the code's one symbol, or as symbol 0 for the empty code.
+#[test]
+fn codewords_an_incomplete_code_lacks_are_rejected() {
+    let litlen = three_symbol_litlen_lens();
+    let mut eob_only = vec![0; 257];
+    eob_only[256] = 1;
+    for (litlen, offset, body, what) in [
+        (
+            &litlen,
+            &[1][..],
+            &[LIT_A, LEN_3, (1, 1), END][..],
+            "offset 1",
+        ),
+        // Offset symbol 1 has codeword `0`.
+        (
+            &litlen,
+            &[0, 1],
+            &[LIT_A, LIT_A, LEN_3, (1, 1), END],
+            "offset 1 of symbol 1",
+        ),
+        (
+            &litlen,
+            &[0],
+            &[LIT_A, LEN_3, (0, 1), END],
+            "offset of the empty code",
+        ),
+        (&eob_only, &[0], &[(1, 1)], "litlen 1"),
+    ] {
+        let c = dynamic_block_stream(litlen, offset, body);
+        // With room for the match: otherwise running out of it comes first,
+        // as in libdeflate.
+        assert_rejected(&c, &[5, 100], what);
+        assert!(
+            miniz_oxide::inflate::decompress_to_vec(&c).is_err(),
+            "{what}"
+        );
+    }
+}
+
+/// A litlen code without end of block makes a block that can't end. zlib
+/// rejects it in the header, before any output.
+#[test]
+fn a_litlen_code_without_end_of_block_is_rejected() {
+    let mut lens = vec![0; 257];
+    lens[usize::from(b'a')] = 1;
+    lens[usize::from(b'b')] = 1;
+    let c = dynamic_block_stream(&lens, &[0], &[(0, 1); 64]);
+    assert_rejected(&c, &[0, 1, 1000], "no end of block");
+    assert!(miniz_oxide::inflate::decompress_to_vec(&c).is_err());
+}
+
+/// zlib rejects an incomplete precode, even with a single 1-bit codeword.
+#[test]
+fn an_incomplete_precode_is_rejected() {
+    // Only precode symbol 18 (11 - 138 zeros), as codeword `0`.
+    let mut w = BitWriter {
+        out: Vec::new(),
+        bits: 0,
+        n: 0,
+    };
+    w.put(1, 1);
+    w.put(2, 2);
+    w.put(0, 5);
+    w.put(0, 5);
+    w.put(0, 4);
+    for len in [0, 0, 1, 0] {
+        w.put(len, 3);
+    }
+    let mut c = w.finish();
+    c.extend_from_slice(&[0; PAD]);
+    assert_rejected(&c, &[0, 100], "incomplete precode");
+}
+
 #[cfg(feature = "std")]
 #[test]
 fn reader_stops_at_the_end_of_the_stream() {

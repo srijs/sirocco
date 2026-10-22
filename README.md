@@ -18,7 +18,7 @@ Fast DEFLATE, zlib and gzip decompression in pure Rust.
   code compiled for the CPU features detected at runtime.
 - **`no_std`.** Decoding, streaming included, works without an allocator.
 - **Tested.** Differentially tested (with proptest) and fuzzed against
-  libdeflate.
+  libdeflate, and against zlib-rs for which streams are valid.
 
 Relies on hardware-accelerated CRC-32 from [crc32fast](https://crates.io/crates/crc32fast)
 and Adler-32 from [adler32furious](https://crates.io/crates/adler32furious).
@@ -94,11 +94,21 @@ The minimum supported Rust version is 1.89.
 
 ### Strictness
 
-Streams that use a symbol RFC 1951 reserves are rejected, as zlib, zlib-rs
-and miniz_oxide reject them: length symbols 286 and 287 and distance symbols
-30 and 31 in fixed Huffman blocks, and dynamic block headers that declare
-more than 286 length or 30 distance codes. libdeflate is more lenient: it
-decodes those symbols as 285 and 29, and accepts those headers.
+sirocco accepts the DEFLATE streams zlib accepts, and rejects the rest, as
+zlib-rs and miniz_oxide do. libdeflate is more lenient about some:
+
+- Length symbols 286 and 287 and distance symbols 30 and 31, which RFC 1951
+  reserves, in fixed Huffman blocks. libdeflate decodes them as 285 and 29.
+- Dynamic block headers that declare more than 286 length or 30 distance
+  codes, which libdeflate accepts.
+- Codewords that an incomplete code lacks: a code may have no codewords, or
+  a single 1-bit one, but a stream can't use the codewords it doesn't have.
+  libdeflate decodes them as the code's one symbol (or as symbol 0).
+- Dynamic blocks without an end-of-block code, or with an incomplete code
+  for the code lengths, which libdeflate rejects only later.
+
+Like libdeflate, but unlike zlib, sirocco doesn't check a gzip header's
+CRC.
 
 ## Performance
 

@@ -1,8 +1,8 @@
 #![no_main]
 
 //! Feeds arbitrary bytes to sirocco's decoder in pieces, through a buffer
-//! smaller than the output can be, and checks it agrees with libdeflate
-//! (see `compare::assert_agree`).
+//! smaller than the output can be, and checks it agrees with libdeflate and
+//! zlib-rs (see `compare::assert_agree`).
 
 use compare::{assert_agree, sirocco_stream, Format, ReferenceDecompressor};
 use libfuzzer_sys::fuzz_target;

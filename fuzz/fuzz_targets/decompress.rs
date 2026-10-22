@@ -2,7 +2,8 @@
 
 //! Decompresses arbitrary bytes with sirocco and libdeflate in all three
 //! formats and checks they agree on the outcome, the consumed input and the
-//! output, except where sirocco rejects symbols RFC 1951 reserves (see
+//! output, except where sirocco rejects a stream as zlib (zlib-rs) does, and
+//! that zlib accepts the raw DEFLATE streams sirocco does (see
 //! `compare::assert_agree`).
 
 use compare::{assert_agree, sirocco_decompress, Format, ReferenceDecompressor, SiroccoDecoders};

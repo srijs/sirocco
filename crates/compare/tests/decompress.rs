@@ -1,7 +1,8 @@
 //! Differential tests: sirocco's decompressor must agree with libdeflate's
 //! on valid streams (output and consumed input) and on corrupt ones (which
-//! error is returned), except that sirocco rejects the symbols RFC 1951
-//! reserves, as zlib does, where libdeflate decodes them.
+//! error is returned), except that sirocco rejects some streams libdeflate
+//! accepts, as zlib (zlib-rs) does, and must accept only those zlib does
+//! (see `compare::assert_agree`).
 
 use compare::{
     assert_agree, reference_compress, sirocco_decompress, Format, Outcome, ReferenceDecompressor,
@@ -251,14 +252,12 @@ fn reserved_offset_symbol_is_rejected_like_zlib() {
     let valid = static_block_with_offset_symbol(29);
     assert_eq!(
         check_same(Format::Deflate, &valid, 1 << 16),
-        Outcome::Ok(valid.len(), want)
+        Outcome::Ok(valid.len(), want.clone())
     );
-    assert_eq!(compare::walk_deflate(Format::Deflate, &valid), Some(false));
-    assert!(!compare::rejected_for_reserved_symbol(
-        Format::Deflate,
-        &valid,
-        1 << 16
-    ));
+    assert_eq!(
+        compare::zlib_decompress(Format::Deflate, &valid, 1 << 16),
+        Ok(Some(want))
+    );
 
     // Padded, as in a git pack: at the very end of the input, an error is
     // truncation (the input may have been cut short).
@@ -273,27 +272,21 @@ fn reserved_offset_symbol_is_rejected_like_zlib() {
         ReferenceDecompressor::new().decompress(Format::Deflate, &c, 1 << 16),
         Outcome::Ok(..)
     ));
-    assert!(compare::rejected_for_reserved_symbol(
-        Format::Deflate,
-        &c,
-        1 << 16
-    ));
+    assert!(compare::zlib_decompress(Format::Deflate, &c, 1 << 16).is_err());
     // Not if zlib fails only past the output libdeflate had room for.
-    assert!(!compare::rejected_for_reserved_symbol(
-        Format::Deflate,
-        &c,
-        1000
-    ));
+    assert_eq!(
+        compare::zlib_decompress(Format::Deflate, &c, 1000),
+        Ok(None)
+    );
     assert!(miniz_oxide::inflate::decompress_to_vec(&c).is_err());
     check_same(Format::Deflate, &c, 1 << 16);
 }
 
-/// zlib gives the same error for a codeword that an incomplete code lacks,
-/// here the one match of a dynamic block with an empty offset code, which
-/// libdeflate and sirocco decode (as offset symbol 0). That is no reserved
-/// symbol, so it mustn't excuse a difference.
+/// And a codeword that an incomplete code lacks, here the one match of a
+/// dynamic block with an empty offset code, which libdeflate decodes (as
+/// offset symbol 0), and sirocco rejects, as zlib and miniz_oxide do.
 #[test]
-fn a_missing_codeword_is_no_reserved_symbol() {
+fn a_missing_codeword_is_rejected_like_zlib() {
     // HLIT 258, HDIST 1 with a zero length, then `a`, a match of length 3
     // and end of block, followed by padding.
     let mut c = vec![
@@ -301,33 +294,16 @@ fn a_missing_codeword_is_no_reserved_symbol() {
     ];
     c.extend_from_slice(&[0; 16]);
     let used = c.len() - 16;
+    let mut ours = SiroccoDecoders::new();
     assert_eq!(
-        check_same(Format::Deflate, &c, 100),
+        sirocco_decompress(&mut ours, Format::Deflate, &c, 100),
+        Outcome::BadData
+    );
+    assert_eq!(
+        ReferenceDecompressor::new().decompress(Format::Deflate, &c, 100),
         Outcome::Ok(used, b"aaaa".to_vec())
     );
-    assert!(!compare::rejected_for_reserved_symbol(
-        Format::Deflate,
-        &c,
-        100
-    ));
-    assert_eq!(compare::walk_deflate(Format::Deflate, &c), None);
-}
-
-/// The walker behind [`compare::rejected_for_reserved_symbol`] reads valid
-/// streams of every block type to their end.
-#[test]
-fn walker_reads_valid_streams() {
-    for s in compare::synthetic_corpus() {
-        for level in [0, 1, 6, 12] {
-            for format in Format::ALL {
-                let c = reference_compress(format, level, &s.data);
-                assert_eq!(
-                    compare::walk_deflate(format, &c),
-                    Some(false),
-                    "{} level {level} {format:?}",
-                    s.name
-                );
-            }
-        }
-    }
+    assert!(compare::zlib_decompress(Format::Deflate, &c, 100).is_err());
+    assert!(miniz_oxide::inflate::decompress_to_vec(&c).is_err());
+    check_same(Format::Deflate, &c, 100);
 }

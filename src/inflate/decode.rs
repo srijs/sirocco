@@ -503,8 +503,7 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
                 }
                 if entry & HUFFDEC_EXCEPTIONAL != 0 {
                     if entry & HUFFDEC_END_OF_BLOCK != 0 {
-                        // Or an invalid symbol, which only the static code
-                        // has, so never from a subtable.
+                        // Or an invalid symbol.
                         break 'done if entry & HUFFDEC_INVALID != 0 {
                             FastExit::BadSymbol
                         } else {
@@ -531,7 +530,14 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
                         break 'next;
                     }
                     if entry & HUFFDEC_END_OF_BLOCK != 0 {
-                        break 'done FastExit::EndOfBlock;
+                        // Invalid symbols are only in main tables (of the
+                        // static code and of incomplete codes), but checking
+                        // costs nothing here.
+                        break 'done if entry & HUFFDEC_INVALID != 0 {
+                            FastExit::BadSymbol
+                        } else {
+                            FastExit::EndOfBlock
+                        };
                     }
                 }
 
@@ -1023,6 +1029,13 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
 
                 // Unnecessary, but checked for consistency with zlib.
                 if i != num_lens {
+                    bad!();
+                }
+
+                // A block that can't end. zlib rejects it here; libdeflate
+                // (and the litlen table, whose missing codewords are
+                // invalid) when it runs out of input or output.
+                if lens[256] == 0 {
                     bad!();
                 }
 
