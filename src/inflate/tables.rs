@@ -38,6 +38,11 @@ pub(super) const HUFFDEC_LITERAL: u32 = 0x8000_0000;
 pub(super) const HUFFDEC_EXCEPTIONAL: u32 = 0x0000_8000;
 pub(super) const HUFFDEC_SUBTABLE_POINTER: u32 = 0x0000_4000;
 pub(super) const HUFFDEC_END_OF_BLOCK: u32 = 0x0000_2000;
+/// Set, along with `HUFFDEC_END_OF_BLOCK`, on the entries of the litlen
+/// symbols 286 and 287, which RFC 1951 reserves. Decoding one ends the block
+/// as an error, so the decode loops pay for the check once per block rather
+/// than once per symbol.
+pub(super) const HUFFDEC_INVALID: u32 = 0x0000_1000;
 
 /// Most bits a match length can take: codeword plus extra bits.
 pub(super) const LENGTH_MAXBITS: u32 = MAX_LITLEN_CODEWORD_LEN + MAX_EXTRA_LENGTH_BITS;
@@ -76,11 +81,12 @@ static PRECODE_DECODE_RESULTS: [u32; NUM_PRECODE_SYMS] = {
 ///     Bit 15-13:  0
 ///     Bit 11-8:   remaining codeword length
 ///     Bit 4-0:    remaining codeword length + number of extra bits
-/// End of block:
+/// End of block, or an invalid symbol:
 ///     Bit 31:     0
 ///     Bit 15:     1 (HUFFDEC_EXCEPTIONAL)
 ///     Bit 14:     0
 ///     Bit 13:     1 (HUFFDEC_END_OF_BLOCK)
+///     Bit 12:     1 for an invalid symbol (HUFFDEC_INVALID)
 ///     Bit 11-8:   remaining codeword length [not used]
 ///     Bit 3-0:    remaining codeword length
 /// Subtable pointer:
@@ -97,14 +103,13 @@ static PRECODE_DECODE_RESULTS: [u32; NUM_PRECODE_SYMS] = {
 /// do `bitsleft -= entry`; the high bits of `bitsleft` are allowed to hold
 /// garbage.
 static LITLEN_DECODE_RESULTS: [u32; NUM_LITLEN_SYMS] = {
-    // Base and extra bits of length symbols 257 - 287. 286 and 287 are
-    // invalid; like libdeflate, decode them as 285.
-    const BASE: [u32; 31] = [
+    // Base and extra bits of length symbols 257 - 285.
+    const BASE: [u32; 29] = [
         3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
-        131, 163, 195, 227, 258, 258, 258,
+        131, 163, 195, 227, 258,
     ];
-    const EXTRA: [u32; 31] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0,
+    const EXTRA: [u32; 29] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
     ];
     let mut t = [0; NUM_LITLEN_SYMS];
     let mut i = 0;
@@ -118,6 +123,12 @@ static LITLEN_DECODE_RESULTS: [u32; NUM_LITLEN_SYMS] = {
         t[257 + j] = (BASE[j] << 16) | EXTRA[j];
         j += 1;
     }
+    // 286 and 287 are invalid. Only the static code has codewords for them
+    // (a dynamic block header that declares them is rejected), and like
+    // zlib, but unlike libdeflate (which decodes them as 285), decoding one
+    // is an error.
+    t[286] = HUFFDEC_EXCEPTIONAL | HUFFDEC_END_OF_BLOCK | HUFFDEC_INVALID;
+    t[287] = t[286];
     t
 };
 
@@ -137,15 +148,19 @@ static LITLEN_DECODE_RESULTS: [u32; NUM_LITLEN_SYMS] = {
 ///     Bit 3-0:    number of main table bits
 /// ```
 static OFFSET_DECODE_RESULTS: [u32; NUM_OFFSET_SYMS] = {
-    // Base and extra bits of offset symbols 0 - 31. 30 and 31 are invalid;
-    // like libdeflate, decode them as 29.
+    // Base and extra bits of offset symbols 0 - 31. 30 and 31 are invalid.
+    // Only the static code has codewords for them (as for litlen 286 and
+    // 287), and like zlib, but unlike libdeflate (which decodes them as 29),
+    // decoding one is an error: they decode to offset 0, which the decode
+    // loops reject along with every other offset that reaches back before
+    // the start of the output, at no extra cost.
     const BASE: [u32; NUM_OFFSET_SYMS] = [
         1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
-        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577, 24577, 24577,
+        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577, 0, 0,
     ];
     const EXTRA: [u32; NUM_OFFSET_SYMS] = [
         0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
-        13, 13, 13, 13,
+        13, 13, 0, 0,
     ];
     let mut t = [0; NUM_OFFSET_SYMS];
     let mut i = 0;

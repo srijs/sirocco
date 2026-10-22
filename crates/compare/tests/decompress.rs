@@ -1,6 +1,7 @@
 //! Differential tests: sirocco's decompressor must agree with libdeflate's
 //! on valid streams (output and consumed input) and on corrupt ones (which
-//! error is returned).
+//! error is returned), except that sirocco rejects the symbols RFC 1951
+//! reserves, as zlib does, where libdeflate decodes them.
 
 use compare::{
     assert_agree, reference_compress, sirocco_decompress, Format, Outcome, ReferenceDecompressor,
@@ -14,7 +15,7 @@ fn check_same(format: Format, input: &[u8], out_len: usize) -> Outcome {
     let a = sirocco_decompress(&mut ours, format, input, out_len);
     let b = theirs.decompress(format, input, out_len);
     let what = format!("{format:?}, {} input bytes, out_len {out_len}", input.len());
-    assert_agree(&a, &b, &what);
+    assert_agree(&a, &b, format, input, out_len, &what);
     a
 }
 
@@ -201,6 +202,132 @@ proptest! {
                 sirocco::decompress(format.ff(), &c, want.len() - 1),
                 Err(sirocco::inflate::Error::InsufficientSpace)
             );
+        }
+    }
+}
+
+/// A raw DEFLATE stream of one static Huffman block: `a`, 96 matches of
+/// litlen symbol 285 (length 258) at offset 1, then a match of litlen
+/// symbol 257 (length 3) at offset symbol `offset_sym` with 13 zero extra
+/// bits, and end of block. Symbol 29 reaches back 24577 bytes, to the `a`.
+fn static_block_with_offset_symbol(offset_sym: u32) -> Vec<u8> {
+    let (mut out, mut bits, mut n) = (Vec::new(), 0u64, 0);
+    // Writes `len` bits of `value`, LSB first, or MSB first as Huffman
+    // codewords go.
+    let mut put = |value: u32, len: u32, msb_first: bool| {
+        let value = if msb_first {
+            value.reverse_bits() >> (32 - len)
+        } else {
+            value
+        };
+        bits |= u64::from(value) << n;
+        n += len;
+        while n >= 8 {
+            out.push(bits as u8);
+            bits >>= 8;
+            n -= 8;
+        }
+    };
+    put(0b011, 3, false); // final block, static Huffman
+    put(0x30 + u32::from(b'a'), 8, true);
+    for _ in 0..96 {
+        put(0xc5, 8, true); // litlen 285
+        put(0, 5, true); // offset symbol 0
+    }
+    put(1, 7, true); // litlen 257
+    put(offset_sym, 5, true);
+    put(0, 13, false);
+    put(0, 7, true); // end of block
+    put(0, 7, false); // the rest of the last byte
+    out
+}
+
+/// Where sirocco and libdeflate part ways: offset symbol 30 (litlen symbols
+/// 286 and 287, and offset symbol 31, are alike). libdeflate decodes it as
+/// 29; sirocco rejects it, as zlib and miniz_oxide do.
+#[test]
+fn reserved_offset_symbol_is_rejected_like_zlib() {
+    let want = [&b"a"[..], &[b'a'; 96 * 258 + 3]].concat();
+    let valid = static_block_with_offset_symbol(29);
+    assert_eq!(
+        check_same(Format::Deflate, &valid, 1 << 16),
+        Outcome::Ok(valid.len(), want)
+    );
+    assert_eq!(compare::walk_deflate(Format::Deflate, &valid), Some(false));
+    assert!(!compare::rejected_for_reserved_symbol(
+        Format::Deflate,
+        &valid,
+        1 << 16
+    ));
+
+    // Padded, as in a git pack: at the very end of the input, an error is
+    // truncation (the input may have been cut short).
+    let mut c = static_block_with_offset_symbol(30);
+    c.extend_from_slice(&[0; 8]);
+    let mut ours = SiroccoDecoders::new();
+    assert_eq!(
+        sirocco_decompress(&mut ours, Format::Deflate, &c, 1 << 16),
+        Outcome::BadData
+    );
+    assert!(matches!(
+        ReferenceDecompressor::new().decompress(Format::Deflate, &c, 1 << 16),
+        Outcome::Ok(..)
+    ));
+    assert!(compare::rejected_for_reserved_symbol(
+        Format::Deflate,
+        &c,
+        1 << 16
+    ));
+    // Not if zlib fails only past the output libdeflate had room for.
+    assert!(!compare::rejected_for_reserved_symbol(
+        Format::Deflate,
+        &c,
+        1000
+    ));
+    assert!(miniz_oxide::inflate::decompress_to_vec(&c).is_err());
+    check_same(Format::Deflate, &c, 1 << 16);
+}
+
+/// zlib gives the same error for a codeword that an incomplete code lacks,
+/// here the one match of a dynamic block with an empty offset code, which
+/// libdeflate and sirocco decode (as offset symbol 0). That is no reserved
+/// symbol, so it mustn't excuse a difference.
+#[test]
+fn a_missing_codeword_is_no_reserved_symbol() {
+    // HLIT 258, HDIST 1 with a zero length, then `a`, a match of length 3
+    // and end of block, followed by padding.
+    let mut c = vec![
+        0x0d, 0xc0, 0x01, 0x09, 0x00, 0x00, 0x00, 0x80, 0xa0, 0xad, 0xfd, 0x3f, 0x91, 0xc4,
+    ];
+    c.extend_from_slice(&[0; 16]);
+    let used = c.len() - 16;
+    assert_eq!(
+        check_same(Format::Deflate, &c, 100),
+        Outcome::Ok(used, b"aaaa".to_vec())
+    );
+    assert!(!compare::rejected_for_reserved_symbol(
+        Format::Deflate,
+        &c,
+        100
+    ));
+    assert_eq!(compare::walk_deflate(Format::Deflate, &c), None);
+}
+
+/// The walker behind [`compare::rejected_for_reserved_symbol`] reads valid
+/// streams of every block type to their end.
+#[test]
+fn walker_reads_valid_streams() {
+    for s in compare::synthetic_corpus() {
+        for level in [0, 1, 6, 12] {
+            for format in Format::ALL {
+                let c = reference_compress(format, level, &s.data);
+                assert_eq!(
+                    compare::walk_deflate(format, &c),
+                    Some(false),
+                    "{} level {level} {format:?}",
+                    s.name
+                );
+            }
         }
     }
 }

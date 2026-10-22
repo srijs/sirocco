@@ -10,7 +10,7 @@ use crate::Format;
 pub(super) const WINDOW: usize = 32 * 1024;
 
 /// Room for input cut off mid-symbol or mid-block-header, which the decoder
-/// needs again. The longest is a dynamic block header: 290 bytes (see
+/// needs again. The longest is a dynamic block header: 286 bytes (see
 /// `carry_holds_the_longest_block_header`).
 const CARRY_LEN: usize = 1024;
 

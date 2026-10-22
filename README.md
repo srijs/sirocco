@@ -92,6 +92,14 @@ The minimum supported Rust version is 1.89.
   `gzip -d` does); `inflate::Decoder`, `Scanner` and `Reader` read one member
   at a time.
 
+### Strictness
+
+Streams that use a symbol RFC 1951 reserves are rejected, as zlib, zlib-rs
+and miniz_oxide reject them: length symbols 286 and 287 and distance symbols
+30 and 31 in fixed Huffman blocks, and dynamic block headers that declare
+more than 286 length or 30 distance codes. libdeflate is more lenient: it
+decodes those symbols as 285 and 29, and accepts those headers.
+
 ## Performance
 
 sirocco against libdeflate 1.26 and zlib-rs 0.6, one-shot decompression,

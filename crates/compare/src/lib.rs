@@ -314,13 +314,266 @@ impl Outcome {
     }
 }
 
-/// Panics unless [`Outcome::agrees_with`].
+/// Panics unless [`Outcome::agrees_with`], or sirocco rejected `input` and
+/// libdeflate (with an `out_len`-byte buffer) didn't because of a symbol RFC
+/// 1951 reserves (see [`rejected_for_reserved_symbol`]): there sirocco is
+/// strict like zlib, and libdeflate lenient.
 #[track_caller]
-pub fn assert_agree(ours: &Outcome, theirs: &Outcome, what: &dyn std::fmt::Display) {
+pub fn assert_agree(
+    ours: &Outcome,
+    theirs: &Outcome,
+    format: Format,
+    input: &[u8],
+    out_len: usize,
+    what: &dyn std::fmt::Display,
+) {
     assert!(
-        ours.agrees_with(theirs),
+        ours.agrees_with(theirs)
+            || (matches!(ours, Outcome::BadData | Outcome::Truncated)
+                && matches!(theirs, Outcome::Ok(..) | Outcome::InsufficientSpace)
+                && rejected_for_reserved_symbol(format, input, out_len)),
         "sirocco {ours:?} vs libdeflate {theirs:?}: {what}"
     );
+}
+
+/// Whether the first thing wrong with `input` is a symbol RFC 1951 reserves,
+/// reached within the first `out_len` bytes of output: litlen symbol 286 or
+/// 287 or offset symbol 30 or 31 in a static Huffman block, or a dynamic
+/// block header that declares more than 286 litlen or 30 offset codes.
+/// sirocco rejects these, as zlib does; libdeflate decodes the symbols as 285
+/// and 29, and accepts the headers.
+///
+/// Two independent decoders must agree: [`walk_deflate`] must find the
+/// reserved symbol before any other problem, and zlib (zlib-rs) must fail
+/// on it, with output at most `out_len` bytes. zlib's messages alone aren't
+/// enough: it gives the same ones for a codeword missing from an incomplete
+/// dynamic code, which libdeflate and sirocco decode as the code's one
+/// symbol.
+#[must_use]
+pub fn rejected_for_reserved_symbol(format: Format, input: &[u8], out_len: usize) -> bool {
+    walk_deflate(format, input) == Some(true)
+        && zlib_fails_on_reserved_symbol(format, input, out_len)
+}
+
+/// zlib's errors for the reserved symbols.
+const RESERVED_SYMBOL_ERRORS: [&str; 3] = [
+    "invalid literal/length code",
+    "invalid distance code",
+    "too many length or distance symbols",
+];
+
+/// Whether zlib-rs fails on `input` with one of [`RESERVED_SYMBOL_ERRORS`],
+/// having written at most `out_len` bytes.
+fn zlib_fails_on_reserved_symbol(format: Format, input: &[u8], out_len: usize) -> bool {
+    let mut z = match format {
+        Format::Deflate => zlib_rs::Inflate::new(false, 15),
+        Format::Zlib => zlib_rs::Inflate::new(true, 15),
+        Format::Gzip => zlib_rs::Inflate::new(true, 16 + 15),
+    };
+    // A byte at a time, which keeps zlib-rs out of its fast decode loop:
+    // errors there come back as "repeated call with bad state".
+    let mut out = vec![0; 1 << 16];
+    loop {
+        let (bi, bo) = (z.total_in(), z.total_out());
+        let Some(byte) = input.get(bi as usize..=bi as usize) else {
+            return false;
+        };
+        match z.decompress(byte, &mut out, zlib_rs::InflateFlush::NoFlush) {
+            Ok(zlib_rs::Status::StreamEnd) => return false,
+            Ok(_) if z.total_in() == bi && z.total_out() == bo => return false,
+            Ok(_) => {}
+            Err(_) => {
+                return z.total_out() <= out_len as u64
+                    && z.error_message()
+                        .is_some_and(|m| RESERVED_SYMBOL_ERRORS.contains(&m));
+            }
+        }
+    }
+}
+
+/// Walks the first DEFLATE stream in `input` (after its `format` header) a
+/// bit at a time, as zlib's `puff` does, without writing output. `Some(true)`
+/// if it comes to a reserved symbol (see [`rejected_for_reserved_symbol`])
+/// before anything else goes wrong, `Some(false)` if it ends without one, and
+/// `None` if the input ends first or something else is wrong, such as a
+/// codeword that an incomplete code lacks.
+#[must_use]
+pub fn walk_deflate(format: Format, input: &[u8]) -> Option<bool> {
+    let start = match format {
+        Format::Deflate => 0,
+        // No preset dictionary.
+        Format::Zlib => (*input.get(1)? & 0x20 == 0).then_some(2)?,
+        Format::Gzip => {
+            let flags = *input.get(3)?;
+            let mut p = 10;
+            if flags & 4 != 0 {
+                p += 2 + usize::from(u16::from_le_bytes([*input.get(p)?, *input.get(p + 1)?]));
+            }
+            for flag in [8, 16] {
+                if flags & flag != 0 {
+                    p += input.get(p..)?.iter().position(|&b| b == 0)? + 1;
+                }
+            }
+            if flags & 2 != 0 {
+                p += 2;
+            }
+            p
+        }
+    };
+    let mut b = Bits {
+        data: input.get(start..)?,
+        pos: 0,
+    };
+    loop {
+        let last = b.get(1)? == 1;
+        match b.get(2)? {
+            0 => {
+                b.pos = b.pos.next_multiple_of(8);
+                let len = b.get(16)?;
+                if b.get(16)? != !len & 0xffff {
+                    return None;
+                }
+                b.pos += 8 * len as usize;
+                if b.pos > 8 * b.data.len() {
+                    return None;
+                }
+            }
+            1 => {
+                let mut lens = [8; 288];
+                lens[144..256].fill(9);
+                lens[256..280].fill(7);
+                // All 32 offset symbols, so that 30 and 31 decode.
+                let (litlen, offset) = (Code::new(&lens)?, Code::new(&[5; 32])?);
+                if walk_symbols(&mut b, &litlen, &offset)? {
+                    return Some(true);
+                }
+            }
+            2 => {
+                let num_litlen = b.get(5)? as usize + 257;
+                let num_offset = b.get(5)? as usize + 1;
+                let num_precode = b.get(4)? as usize + 4;
+                if num_litlen > 286 || num_offset > 30 {
+                    return Some(true);
+                }
+                let mut precode_lens = [0; 19];
+                for &sym in &[
+                    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+                ][..num_precode]
+                {
+                    precode_lens[sym] = b.get(3)? as u8;
+                }
+                let precode = Code::new(&precode_lens)?;
+                let mut lens = Vec::new();
+                while lens.len() < num_litlen + num_offset {
+                    let (len, n) = match precode.decode(&mut b)? {
+                        len @ 0..16 => (len as u8, 1),
+                        16 => (*lens.last()?, 3 + b.get(2)?),
+                        17 => (0, 3 + b.get(3)?),
+                        _ => (0, 11 + b.get(7)?),
+                    };
+                    lens.extend(std::iter::repeat_n(len, n as usize));
+                }
+                if lens.len() != num_litlen + num_offset {
+                    return None;
+                }
+                let (litlen, offset) = lens.split_at(num_litlen);
+                if walk_symbols(&mut b, &Code::new(litlen)?, &Code::new(offset)?)? {
+                    return Some(true);
+                }
+            }
+            _ => return None,
+        }
+        if last {
+            return Some(false);
+        }
+    }
+}
+
+/// Walks the symbols of a Huffman block, up to its end: `Some(true)` at a
+/// reserved symbol.
+fn walk_symbols(b: &mut Bits<'_>, litlen: &Code, offset: &Code) -> Option<bool> {
+    loop {
+        match litlen.decode(b)? {
+            0..256 => {}
+            256 => return Some(false),
+            286.. => return Some(true),
+            sym => {
+                let extra = if (265..285).contains(&sym) {
+                    (sym - 261) / 4
+                } else {
+                    0
+                };
+                b.get(extra as u32)?;
+                match offset.decode(b)? {
+                    30.. => return Some(true),
+                    sym => b.get(if sym < 4 { 0 } else { (sym as u32 - 2) / 2 })?,
+                };
+            }
+        }
+    }
+}
+
+/// Reads a DEFLATE body a bit at a time, lowest bit first.
+struct Bits<'a> {
+    data: &'a [u8],
+    /// In bits.
+    pos: usize,
+}
+
+impl Bits<'_> {
+    /// The next `n` bits, or `None` past the end of the data.
+    fn get(&mut self, n: u32) -> Option<u32> {
+        let mut v = 0;
+        for i in 0..n {
+            let byte = *self.data.get(self.pos / 8)?;
+            v |= u32::from((byte >> (self.pos % 8)) & 1) << i;
+            self.pos += 1;
+        }
+        Some(v)
+    }
+}
+
+/// A canonical Huffman code, possibly incomplete, decoded a bit at a time.
+struct Code {
+    /// Codewords of each length.
+    counts: [i32; 16],
+    /// The symbols in codeword order.
+    symbols: Vec<usize>,
+}
+
+impl Code {
+    /// The code with codeword lengths `lens`, unless it is over-subscribed.
+    fn new(lens: &[u8]) -> Option<Code> {
+        let mut counts = [0; 16];
+        for &len in lens {
+            counts[usize::from(len)] += 1;
+        }
+        let mut left = 1;
+        for &count in &counts[1..] {
+            left = 2 * left - count;
+            if left < 0 {
+                return None;
+            }
+        }
+        let mut symbols: Vec<usize> = (0..lens.len()).filter(|&s| lens[s] != 0).collect();
+        symbols.sort_by_key(|&s| lens[s]);
+        Some(Code { counts, symbols })
+    }
+
+    /// The next symbol, or `None` for a codeword the code lacks.
+    fn decode(&self, b: &mut Bits<'_>) -> Option<usize> {
+        let (mut code, mut first, mut index) = (0, 0, 0);
+        for &count in &self.counts[1..] {
+            code |= b.get(1)? as i32;
+            if code - count < first {
+                return Some(self.symbols[(index + code - first) as usize]);
+            }
+            index += count;
+            first = (first + count) << 1;
+            code <<= 1;
+        }
+        None
+    }
 }
 
 /// libdeflate's decompressor, called through `libdeflate-sys` so the
