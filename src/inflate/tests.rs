@@ -1223,3 +1223,18 @@ fn an_empty_precode_reads_a_bit_per_length() {
     assert_fails(Format::Deflate, &stream(36), Error::BadData);
     assert_fails(Format::Deflate, &stream(35), Error::Truncated);
 }
+
+/// Found by fuzzing: a repeat of the previous length with none before it is
+/// bad data only once its count is in, as zlib.
+#[test]
+fn a_leading_repeat_is_checked_after_its_count() {
+    // A dynamic block whose first code length is precode symbol 16, cut
+    // off one bit into its 2-bit count.
+    let input = [0xBC, 0, 4, 0xA5];
+    assert_fails(Format::Deflate, &input, Error::Truncated);
+    assert_fails(
+        Format::Deflate,
+        &[&input[..], &[0]].concat(),
+        Error::BadData,
+    );
+}

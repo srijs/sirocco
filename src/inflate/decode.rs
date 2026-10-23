@@ -1003,12 +1003,14 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                     } else if presym == 16 {
                         // Repeat the previous length 3 - 6 times. `lens` has room
                         // for the worst-case overrun, so always write 6.
+                        let rep_count = 3 + c.bits.peek(2);
+                        c.bits.consume(2);
+                        // Only after the repeat count, as zlib, so that a
+                        // stream cut off before it is truncated.
                         if i == 0 {
                             bad!();
                         }
                         let rep_val = lens[i - 1];
-                        let rep_count = 3 + c.bits.peek(2);
-                        c.bits.consume(2);
                         lens[i..i + 6].fill(rep_val);
                         i += rep_count;
                     } else if presym == 17 {
