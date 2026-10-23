@@ -1054,8 +1054,11 @@ proptest! {
         let scanned = scan(format, &c, &in_sizes);
         match &want {
             Ok((Some(w), wc)) => prop_assert_eq!(scanned, Ok((w.len() as u64, *wc))),
+            // The checksum may also be all of a cut-off trailer, which then
+            // looks truncated.
             Err(Error::ChecksumMismatch) => prop_assert!(
-                matches!(scanned, Ok(_) | Err(Error::ChecksumMismatch)), "{:?}", scanned
+                matches!(scanned, Ok(_) | Err(Error::ChecksumMismatch | Error::Truncated)),
+                "{:?}", scanned
             ),
             // One-shot ends the body before the trailer; scanning can't, so a
             // corrupt stream can be truncated to one and bad data to the other.
