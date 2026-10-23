@@ -38,6 +38,12 @@ pub(super) const HUFFDEC_LITERAL: u32 = 0x8000_0000;
 pub(super) const HUFFDEC_EXCEPTIONAL: u32 = 0x0000_8000;
 pub(super) const HUFFDEC_SUBTABLE_POINTER: u32 = 0x0000_4000;
 pub(super) const HUFFDEC_END_OF_BLOCK: u32 = 0x0000_2000;
+/// Set, along with `HUFFDEC_END_OF_BLOCK`, on the entries of the litlen
+/// symbols 286 and 287, which RFC 1951 reserves, and of the codewords an
+/// incomplete litlen code lacks. Decoding one ends the block
+/// as an error, so the decode loops pay for the check once per block rather
+/// than once per symbol.
+pub(super) const HUFFDEC_INVALID: u32 = 0x0000_1000;
 
 /// Most bits a match length can take: codeword plus extra bits.
 pub(super) const LENGTH_MAXBITS: u32 = MAX_LITLEN_CODEWORD_LEN + MAX_EXTRA_LENGTH_BITS;
@@ -76,11 +82,12 @@ static PRECODE_DECODE_RESULTS: [u32; NUM_PRECODE_SYMS] = {
 ///     Bit 15-13:  0
 ///     Bit 11-8:   remaining codeword length
 ///     Bit 4-0:    remaining codeword length + number of extra bits
-/// End of block:
+/// End of block, or an invalid symbol:
 ///     Bit 31:     0
 ///     Bit 15:     1 (HUFFDEC_EXCEPTIONAL)
 ///     Bit 14:     0
 ///     Bit 13:     1 (HUFFDEC_END_OF_BLOCK)
+///     Bit 12:     1 for an invalid symbol (HUFFDEC_INVALID)
 ///     Bit 11-8:   remaining codeword length [not used]
 ///     Bit 3-0:    remaining codeword length
 /// Subtable pointer:
@@ -97,14 +104,13 @@ static PRECODE_DECODE_RESULTS: [u32; NUM_PRECODE_SYMS] = {
 /// do `bitsleft -= entry`; the high bits of `bitsleft` are allowed to hold
 /// garbage.
 static LITLEN_DECODE_RESULTS: [u32; NUM_LITLEN_SYMS] = {
-    // Base and extra bits of length symbols 257 - 287. 286 and 287 are
-    // invalid; like libdeflate, decode them as 285.
-    const BASE: [u32; 31] = [
+    // Base and extra bits of length symbols 257 - 285.
+    const BASE: [u32; 29] = [
         3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
-        131, 163, 195, 227, 258, 258, 258,
+        131, 163, 195, 227, 258,
     ];
-    const EXTRA: [u32; 31] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0,
+    const EXTRA: [u32; 29] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
     ];
     let mut t = [0; NUM_LITLEN_SYMS];
     let mut i = 0;
@@ -118,6 +124,13 @@ static LITLEN_DECODE_RESULTS: [u32; NUM_LITLEN_SYMS] = {
         t[257 + j] = (BASE[j] << 16) | EXTRA[j];
         j += 1;
     }
+    // 286 and 287 are invalid. Only the static code has codewords for them
+    // (a dynamic block header that declares them is rejected), and an
+    // incomplete code's missing codeword decodes to 286. Like zlib, but
+    // unlike libdeflate (which decodes them as 285), decoding one is an
+    // error.
+    t[286] = HUFFDEC_EXCEPTIONAL | HUFFDEC_END_OF_BLOCK | HUFFDEC_INVALID;
+    t[287] = t[286];
     t
 };
 
@@ -137,15 +150,20 @@ static LITLEN_DECODE_RESULTS: [u32; NUM_LITLEN_SYMS] = {
 ///     Bit 3-0:    number of main table bits
 /// ```
 static OFFSET_DECODE_RESULTS: [u32; NUM_OFFSET_SYMS] = {
-    // Base and extra bits of offset symbols 0 - 31. 30 and 31 are invalid;
-    // like libdeflate, decode them as 29.
+    // Base and extra bits of offset symbols 0 - 31. 30 and 31 are invalid.
+    // Only the static code has codewords for them, and an incomplete code's
+    // missing codewords decode to 30 (as for litlen 286 and 287). Like zlib,
+    // but unlike libdeflate (which decodes them as 29),
+    // decoding one is an error: they decode to offset 0, which the decode
+    // loops reject along with every other offset that reaches back before
+    // the start of the output, at no extra cost.
     const BASE: [u32; NUM_OFFSET_SYMS] = [
         1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
-        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577, 24577, 24577,
+        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577, 0, 0,
     ];
     const EXTRA: [u32; NUM_OFFSET_SYMS] = [
         0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
-        13, 13, 13, 13,
+        13, 13, 0, 0,
     ];
     let mut t = [0; NUM_OFFSET_SYMS];
     let mut i = 0;
@@ -176,7 +194,9 @@ fn make_decode_table_entry(decode_results: &[u32], sym: usize, len: u32) -> u32 
 ///
 /// Returns `false` if `lens` isn't a valid code.
 ///
-/// Every value in `lens` must be at most `max_codeword_len`.
+/// Every value in `lens` must be at most `max_codeword_len`. `missing` is
+/// the invalid symbol that the codewords an incomplete code lacks decode to,
+/// or `None` if the code must be complete.
 #[allow(clippy::too_many_arguments)]
 fn build_decode_table(
     decode_table: &mut [u32],
@@ -185,6 +205,7 @@ fn build_decode_table(
     table_bits: u32,
     mut max_codeword_len: u32,
     sorted_syms: &mut [u16; MAX_NUM_SYMS],
+    missing: Option<usize>,
 ) -> bool {
     let mut len_counts = [0u32; MAX_CODEWORD_LEN + 1];
     let mut offsets = [0u32; MAX_CODEWORD_LEN + 1];
@@ -248,20 +269,35 @@ fn build_decode_table(
         return false;
     }
 
-    // Incomplete code. Like libdeflate, accept the empty code and a code with
-    // a single codeword of length 1, and map both to a complete code by giving
-    // one symbol both 1-bit codewords.
+    // Incomplete code. Like zlib, accept the empty code and a code with a
+    // single codeword of length 1, except as the precode, and decode the
+    // codewords they lack to an invalid symbol, which the decode loops reject
+    // (libdeflate decodes them as the one symbol, or as symbol 0).
     if codespace_used < (1 << max_codeword_len) {
-        let sym = if codespace_used == 0 {
-            0
+        let Some(missing) = missing else {
+            // As zlib, an empty precode decodes every codeword length as 0
+            // from 1 bit, so the block is bad (without end of block) or
+            // truncated, whichever comes first.
+            if codespace_used == 0 {
+                decode_table[..1 << table_bits].fill(make_decode_table_entry(decode_results, 0, 1));
+                return true;
+            }
+            return false;
+        };
+        let missing = make_decode_table_entry(decode_results, missing, 1);
+        let used = if codespace_used == 0 {
+            missing
         } else {
             if codespace_used != (1 << (max_codeword_len - 1)) || len_counts[1] != 1 {
                 return false;
             }
-            sorted[0] as usize
+            make_decode_table_entry(decode_results, sorted[0] as usize, 1)
         };
-        let entry = make_decode_table_entry(decode_results, sym, 1);
-        decode_table[..1 << table_bits].fill(entry);
+        // Indexed by the bit-reversed codeword, so the first bit is the
+        // lowest: the codeword 0 is the used one, 1 the missing one.
+        for pair in decode_table[..1 << table_bits].as_chunks_mut::<2>().0 {
+            *pair = [used, missing];
+        }
         return true;
     }
 
@@ -465,6 +501,7 @@ fn build_precode_table(
         PRECODE_TABLEBITS,
         MAX_PRE_CODEWORD_LEN,
         sorted_syms,
+        None,
     )
 }
 
@@ -483,6 +520,7 @@ fn build_litlen_table(
         LITLEN_TABLEBITS,
         MAX_LITLEN_CODEWORD_LEN,
         sorted_syms,
+        Some(286),
     )
 }
 
@@ -499,6 +537,7 @@ fn build_offset_table(
         OFFSET_TABLEBITS,
         MAX_OFFSET_CODEWORD_LEN,
         sorted_syms,
+        Some(30),
     )
 }
 
@@ -553,7 +592,7 @@ const fn build_short_code_table<const N: usize>(
 }
 
 /// The codeword lengths of the static Huffman codes: litlen, then offset.
-const STATIC_LENS: [u8; NUM_LITLEN_SYMS + NUM_OFFSET_SYMS] = {
+pub(super) const STATIC_LENS: [u8; NUM_LITLEN_SYMS + NUM_OFFSET_SYMS] = {
     let mut lens = [0; NUM_LITLEN_SYMS + NUM_OFFSET_SYMS];
     let mut i = 0;
     while i < lens.len() {

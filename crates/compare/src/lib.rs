@@ -18,11 +18,14 @@ pub struct Sample {
     pub data: Vec<u8>,
 }
 
-/// Small xorshift PRNG so the corpus is reproducible without extra deps.
-struct Rng(u64);
+/// Small xorshift PRNG so the corpus (and tests) are reproducible without
+/// extra deps.
+#[derive(Debug)]
+pub struct Rng(pub u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
@@ -267,6 +270,23 @@ impl Format {
     }
 }
 
+/// Compresses `data` with zlib-rs into fixed Huffman blocks, as raw
+/// DEFLATE.
+#[must_use]
+pub fn fixed_compress(data: &[u8]) -> Vec<u8> {
+    let config = zlib_rs::DeflateConfig {
+        window_bits: -15,
+        strategy: zlib_rs::Strategy::Fixed,
+        ..zlib_rs::DeflateConfig::new(6)
+    };
+    let mut out = vec![0; zlib_rs::compress_bound(data.len())];
+    let (c, rc) = zlib_rs::compress_slice(&mut out, data, config);
+    assert_eq!(rc, zlib_rs::ReturnCode::Ok, "zlib-rs compress");
+    let n = c.len();
+    out.truncate(n);
+    out
+}
+
 /// Compresses `data` with libdeflate at `level` (0-12).
 #[must_use]
 pub fn reference_compress(format: Format, level: i32, data: &[u8]) -> Vec<u8> {
@@ -295,92 +315,57 @@ pub enum Outcome {
     Ok(usize, Vec<u8>),
     BadData,
     InsufficientSpace,
-    /// The input ended early (only sirocco tells this apart).
+    /// The input ended early.
     Truncated,
 }
 
-impl Outcome {
-    /// Whether sirocco's outcome agrees with libdeflate's. libdeflate reports
-    /// truncation as bad data or lack of room, so
-    /// [`Truncated`](Outcome::Truncated) agrees with either.
-    #[must_use]
-    pub fn agrees_with(&self, reference: &Outcome) -> bool {
-        match self {
-            Outcome::Truncated => {
-                matches!(reference, Outcome::BadData | Outcome::InsufficientSpace)
-            }
-            _ => self == reference,
-        }
-    }
-}
-
-/// Panics unless [`Outcome::agrees_with`].
+/// Panics unless the outcomes are the same.
 #[track_caller]
 pub fn assert_agree(ours: &Outcome, theirs: &Outcome, what: &dyn std::fmt::Display) {
     assert!(
-        ours.agrees_with(theirs),
-        "sirocco {ours:?} vs libdeflate {theirs:?}: {what}"
+        ours == theirs,
+        "sirocco {ours:?} vs zlib-rs {theirs:?}: {what}"
     );
 }
 
-/// libdeflate's decompressor, called through `libdeflate-sys` so the
-/// consumed input size (`actual_in_nbytes`) can be compared too.
-#[derive(Debug)]
-pub struct ReferenceDecompressor(*mut libdeflate_sys::libdeflate_decompressor);
-
-impl Default for ReferenceDecompressor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// The reference decompressor: zlib-rs, since sirocco accepts the streams
+/// zlib accepts, and only those.
+#[derive(Debug, Default)]
+pub struct ReferenceDecompressor;
 
 impl ReferenceDecompressor {
     #[must_use]
     pub fn new() -> Self {
-        // SAFETY: plain allocation.
-        let p = unsafe { libdeflate_sys::libdeflate_alloc_decompressor() };
-        assert!(!p.is_null());
-        ReferenceDecompressor(p)
+        ReferenceDecompressor
     }
 
     pub fn decompress(&mut self, format: Format, input: &[u8], out_len: usize) -> Outcome {
-        use libdeflate_sys::*;
+        let mut z = match format {
+            Format::Deflate => zlib_rs::Inflate::new(false, 15),
+            Format::Zlib => zlib_rs::Inflate::new(true, 15),
+            Format::Gzip => zlib_rs::Inflate::new(true, 16 + 15),
+        };
         let mut out = vec![0u8; out_len];
-        let (mut actual_in, mut actual_out) = (0usize, 0usize);
-        let f = match format {
-            Format::Deflate => libdeflate_deflate_decompress_ex,
-            Format::Zlib => libdeflate_zlib_decompress_ex,
-            Format::Gzip => libdeflate_gzip_decompress_ex,
-        };
-        // SAFETY: pointers and lengths come from live slices.
-        let r = unsafe {
-            f(
-                self.0,
-                input.as_ptr().cast(),
-                input.len(),
-                out.as_mut_ptr().cast(),
-                out.len(),
-                &raw mut actual_in,
-                &raw mut actual_out,
-            )
-        };
-        if r == libdeflate_result_LIBDEFLATE_SUCCESS {
-            out.truncate(actual_out);
-            Outcome::Ok(actual_in, out)
-        } else if r == libdeflate_result_LIBDEFLATE_BAD_DATA {
-            Outcome::BadData
-        } else if r == libdeflate_result_LIBDEFLATE_INSUFFICIENT_SPACE {
-            Outcome::InsufficientSpace
-        } else {
-            panic!("unexpected libdeflate result {r}")
+        match z.decompress(input, &mut out, zlib_rs::InflateFlush::Finish) {
+            Ok(zlib_rs::Status::StreamEnd) => {
+                out.truncate(z.total_out() as usize);
+                Outcome::Ok(z.total_in() as usize, out)
+            }
+            // zlib stops when it runs out of input or of room. Out of
+            // both, it is out of room if one more byte of it lets the stream
+            // go on.
+            Ok(_) if z.total_out() as usize == out_len => {
+                let rest = &input[z.total_in() as usize..];
+                match z.decompress(rest, &mut [0], zlib_rs::InflateFlush::Finish) {
+                    Ok(zlib_rs::Status::BufError) if z.total_out() as usize == out_len => {
+                        Outcome::Truncated
+                    }
+                    _ => Outcome::InsufficientSpace,
+                }
+            }
+            Ok(_) => Outcome::Truncated,
+            Err(_) => Outcome::BadData,
         }
-    }
-}
-
-impl Drop for ReferenceDecompressor {
-    fn drop(&mut self) {
-        // SAFETY: allocated in `new`, freed once.
-        unsafe { libdeflate_sys::libdeflate_free_decompressor(self.0) }
     }
 }
 
@@ -431,7 +416,7 @@ pub fn sirocco_decompress(
 /// The outcome for a sirocco error.
 fn error_outcome(e: sirocco::inflate::Error) -> Outcome {
     match e {
-        // libdeflate reports a bad checksum or a preset dictionary as bad data.
+        // zlib-rs reports a bad checksum or a preset dictionary as bad data.
         sirocco::inflate::Error::BadData
         | sirocco::inflate::Error::ChecksumMismatch
         | sirocco::inflate::Error::PresetDictionary => Outcome::BadData,

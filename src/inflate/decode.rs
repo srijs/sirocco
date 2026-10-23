@@ -75,7 +75,7 @@ const DEFLATE_BLOCKTYPE_STATIC_HUFFMAN: BitBuf = 1;
 const DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN: BitBuf = 2;
 
 /// The order in which precode lengths are stored.
-const PRECODE_LENS_PERMUTATION: [u8; NUM_PRECODE_SYMS] = [
+pub(super) const PRECODE_LENS_PERMUTATION: [u8; NUM_PRECODE_SYMS] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 
@@ -288,8 +288,23 @@ enum FastExit {
     Margin,
     /// Decoded the end-of-block symbol.
     EndOfBlock,
-    /// A match offset reaches back before the start of the output.
-    BadOffset,
+    /// An invalid symbol, or a match offset that reaches back before the
+    /// start of the output.
+    BadData,
+}
+
+/// Whether a match `offset` back from `out_pos` is invalid: before the start
+/// of the output, or 0, which the invalid offset symbols decode to. Either
+/// way costs no more than `offset > out_pos` alone: writing, the subtraction
+/// is the start of the match, which the copy needs anyway; not writing, 0
+/// wraps around.
+#[inline(always)]
+fn bad_offset<const WRITE: bool>(offset: usize, out_pos: usize) -> bool {
+    if WRITE {
+        out_pos.wrapping_sub(offset) >= out_pos
+    } else {
+        offset.wrapping_sub(1) >= out_pos
+    }
 }
 
 /// Input bytes that the fastloop needs ahead of it to start an iteration:
@@ -491,7 +506,14 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
                 }
                 if entry & HUFFDEC_EXCEPTIONAL != 0 {
                     if entry & HUFFDEC_END_OF_BLOCK != 0 {
-                        break 'done FastExit::EndOfBlock;
+                        // Or an invalid symbol, which only the static code
+                        // and incomplete codes (of 1-bit codewords) have, so
+                        // never from a subtable.
+                        break 'done if entry & HUFFDEC_INVALID != 0 {
+                            FastExit::BadData
+                        } else {
+                            FastExit::EndOfBlock
+                        };
                     }
 
                     // Subtable pointer. The subtable entry may be a
@@ -558,8 +580,8 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
                 let offset = entry_value(entry, saved_bitbuf);
 
                 // Validate the offset; needed even in the fastloop.
-                if offset > out_pos {
-                    break 'done FastExit::BadOffset;
+                if bad_offset::<WRITE>(offset, out_pos) {
+                    break 'done FastExit::BadData;
                 }
 
                 // Refill and preload the next litlen entry before
@@ -865,12 +887,13 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
         }};
     }
 
-    // An error after reading past the end of `input` may be down to the
-    // implicit zero bytes, so it counts as truncation. With more input to
-    // come, a real error comes back after resuming.
+    // An error that consumed bits from past the end of `input` may be down
+    // to the implicit zero bytes, so it counts as truncation, as zlib only
+    // decides once it has the bits. With more input to come, a real error
+    // comes back after resuming.
     macro_rules! bad {
         () => {{
-            if c.overread > 0 {
+            if c.consumed_overread() {
                 truncated!();
             }
             return Err(BadData);
@@ -932,6 +955,13 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                 let num_offset_syms = 1 + ((c.bits.buf >> 8) & bitmask(5)) as usize;
                 let num_explicit_precode_lens = 4 + ((c.bits.buf >> 13) & bitmask(4)) as usize;
                 c.bits.consume(17);
+
+                // Litlen symbols 286 and 287 and offset symbols 30 and 31
+                // are invalid, so they can't have codewords. libdeflate
+                // allows them here; zlib rejects them.
+                if num_litlen_syms > 286 || num_offset_syms > 30 {
+                    bad!();
+                }
 
                 // Read the precode codeword lengths.
                 let (explicit, implicit) =
@@ -1001,6 +1031,13 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                     bad!();
                 }
 
+                // A block that can't end. zlib rejects it here; libdeflate
+                // (and the litlen table, whose missing codewords are
+                // invalid) when it runs out of input or output.
+                if lens[256] == 0 {
+                    bad!();
+                }
+
                 if !t.build_dynamic(num_litlen_syms, num_offset_syms) {
                     bad!();
                 }
@@ -1061,13 +1098,12 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
             c.in_pos += n;
             c.out_pos += n;
             if n < left {
-                if c.out_pos < out_len {
-                    if !more_input {
-                        return Err(Truncated);
-                    }
-                    pause_stored!(left - n, is_final_block, true);
+                // Out of input is truncation even when out of room too, as
+                // zlib.
+                if !more_input && c.in_pos == input.len() {
+                    return Err(Truncated);
                 }
-                pause_stored!(left - n, is_final_block, false);
+                pause_stored!(left - n, is_final_block, c.out_pos < out_len);
             }
             if is_final_block {
                 break;
@@ -1095,7 +1131,7 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
             s.finish(&mut c);
             match exit {
                 FastExit::EndOfBlock => break 'block_done,
-                FastExit::BadOffset => bad!(),
+                FastExit::BadData => bad!(),
                 FastExit::Margin => {}
             }
 
@@ -1132,13 +1168,12 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                     continue;
                 }
                 if entry & HUFFDEC_END_OF_BLOCK != 0 {
+                    if entry & HUFFDEC_INVALID != 0 {
+                        bad!();
+                    }
                     break 'block_done;
                 }
                 let length = entry_value(entry, saved_bitbuf);
-                let room = out_len - c.out_pos;
-                if room == 0 {
-                    full!(symbol_start, Some(is_final_block));
-                }
 
                 if !can_consume(LENGTH_MAXBITS + OFFSET_MAXBITS) {
                     refill_bits!();
@@ -1154,11 +1189,17 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                 let offset = entry_value(entry, c.bits.buf);
                 c.bits.consume_entry(entry);
 
-                if offset > c.out_pos {
-                    if length > room {
-                        // Out of room first, as libdeflate.
-                        full!(symbol_start, Some(is_final_block));
-                    }
+                // As zlib: an invalid offset symbol (offset 0) is bad data
+                // even with no room for the match, an offset that reaches
+                // too far back only if some of the match fits.
+                if offset == 0 {
+                    bad!();
+                }
+                let room = out_len - c.out_pos;
+                if room == 0 {
+                    full!(symbol_start, Some(is_final_block));
+                }
+                if bad_offset::<WRITE>(offset, c.out_pos) {
                     bad!();
                 }
                 if length > room {

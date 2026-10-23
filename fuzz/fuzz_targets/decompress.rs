@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Decompresses arbitrary bytes with sirocco and libdeflate in all three
+//! Decompresses arbitrary bytes with sirocco and zlib-rs in all three
 //! formats and checks they agree on the outcome, the consumed input and the
 //! output.
 

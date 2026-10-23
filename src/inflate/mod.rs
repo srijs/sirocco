@@ -32,7 +32,7 @@ use decode::Status;
 #[cfg(feature = "alloc")]
 use tables::Tables;
 #[cfg(feature = "alloc")]
-use wrapper::{body_bounds, Check};
+use wrapper::{body_start, Check};
 
 /// Why decompression failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -154,9 +154,8 @@ impl VecDecoder {
         guess: usize,
     ) -> Result<usize, Error> {
         let out_start = out.len();
-        let r = body_bounds(self.format, input).and_then(|(start, body_end)| {
-            let consumed =
-                self.inflate_growing(&input[start..body_end], out, out_start, max_len, guess)?;
+        let r = body_start(self.format, input).and_then(|start| {
+            let consumed = self.inflate_growing(&input[start..], out, out_start, max_len, guess)?;
             let mut check = Check::new(self.format);
             check.update(&out[out_start..]);
             check.verify_at(input, start + consumed)

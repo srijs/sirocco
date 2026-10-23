@@ -1,18 +1,21 @@
 //! Tests of [`Decoder`], [`Scanner`], [`Reader`](super::Reader) and the
 //! `Vec` decoder.
 
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use proptest::prelude::*;
 
+use super::decode::PRECODE_LENS_PERMUTATION;
+use super::tables::{NUM_LITLEN_SYMS, STATIC_LENS};
 use super::*;
 use crate::Format;
 
 const FORMATS: [Format; 3] = [Format::Deflate, Format::Zlib, Format::Gzip];
 
 /// Compresses with miniz_oxide (level capped at 10), keeping C out of this
-/// crate's builds; `crates/compare` tests against libdeflate.
+/// crate's builds; `crates/compare` tests against zlib-rs.
 fn reference_compress(format: Format, level: i32, data: &[u8]) -> Vec<u8> {
     use miniz_oxide::deflate::{compress_to_vec, compress_to_vec_zlib};
     let level = level.min(10) as u8;
@@ -341,13 +344,18 @@ fn concatenated_streams_start_by_themselves() {
     }
 }
 
-/// Found by fuzzing: a zlib stream too short for a trailer is truncated, not
-/// out of room (libdeflate: bad data).
+/// Found by fuzzing: a zlib stream too short for a trailer is truncated
+/// (libdeflate: bad data). Without room, it is out of room first, as zlib.
 #[test]
 fn input_too_short_for_a_trailer_is_truncated() {
     let input = [0x08, 0x5b, 0x9a, 0x08, 0xdb];
-    let r = Decoder::new(Format::Zlib).decompress(&input, &mut [], true);
+    let mut buf = [0; 64];
+    let r = Decoder::new(Format::Zlib).decompress(&input, &mut buf, true);
     assert_eq!(r, Err(Error::Truncated));
+    let p = Decoder::new(Format::Zlib)
+        .decompress(&input, &mut [], true)
+        .unwrap();
+    assert!(p.full && !p.done);
 }
 
 #[test]
@@ -416,6 +424,7 @@ fn truncated_input_is_reported_as_such() {
 }
 
 /// Writes bits LSB first, as DEFLATE packs them.
+#[derive(Default)]
 struct BitWriter {
     out: Vec<u8>,
     bits: u64,
@@ -468,73 +477,272 @@ fn canonical_codes(lens: &[u8]) -> Vec<u32> {
         .collect()
 }
 
-/// A raw DEFLATE stream decoding to "ab", whose dynamic block header is the
-/// longest possible: 290 bytes, with all 320 lengths as 7-bit codewords.
-fn longest_header_stream() -> Vec<u8> {
-    const PERMUTATION: [usize; 19] = [
-        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
-    ];
-    // A complete precode with 7-bit codewords for lengths 5, 8 and 9.
+/// A complete code over `n` symbols (from `2^len` to `2^(len + 1)`) of
+/// `len`- and `len + 1`-bit codewords.
+fn complete_lens(n: usize, len: u8) -> Vec<u8> {
+    let mut lens = vec![len; n];
+    lens[(2 << len) - n..].fill(len + 1);
+    lens
+}
+
+/// A codeword in [`dynamic_block_stream`]: of a litlen symbol, or raw.
+#[derive(Clone, Copy)]
+enum Codeword {
+    Litlen(usize),
+    Raw(u32, u32),
+}
+
+/// A raw DEFLATE stream of one dynamic Huffman block with the precode
+/// codeword lengths `precode_lens` (by symbol, which mustn't include the
+/// repeat symbols), the codeword lengths `litlen_lens` and `offset_lens`,
+/// and the codewords `body`.
+fn dynamic_block_stream(
+    precode_lens: &[u8; 19],
+    litlen_lens: &[u8],
+    offset_lens: &[u8],
+    body: &[Codeword],
+) -> Vec<u8> {
+    let mut w = BitWriter::default();
+    w.put(1, 1); // final block
+    w.put(2, 2); // dynamic Huffman
+    w.put((litlen_lens.len() - 257) as u32, 5);
+    w.put((offset_lens.len() - 1) as u32, 5);
+    w.put(19 - 4, 4);
+    for sym in PRECODE_LENS_PERMUTATION {
+        w.put(u32::from(precode_lens[usize::from(sym)]), 3);
+    }
+    let precode = canonical_codes(precode_lens);
+    for &len in litlen_lens.iter().chain(offset_lens) {
+        let len = usize::from(len);
+        w.put_code(precode[len], u32::from(precode_lens[len]));
+    }
+    let litlen = canonical_codes(litlen_lens);
+    for &codeword in body {
+        match codeword {
+            Codeword::Litlen(sym) => w.put_code(litlen[sym], u32::from(litlen_lens[sym])),
+            Codeword::Raw(code, len) => w.put_code(code, len),
+        }
+    }
+    w.finish()
+}
+
+/// A raw DEFLATE stream decoding to "ab" in one dynamic block, whose header
+/// declares `num_litlen` litlen and `num_offset` offset codeword lengths,
+/// all as 7-bit precode codewords. With the most valid symbols (286 and 30)
+/// it has the longest possible header: 286 bytes, with 316 lengths.
+fn dynamic_header_stream(num_litlen: usize, num_offset: usize) -> Vec<u8> {
+    // A complete precode with 7-bit codewords for lengths 4, 5, 8 and 9.
     let mut precode_lens = [0u8; 19];
     for (sym, len) in [
         (0, 1),
         (1, 2),
         (2, 3),
         (3, 4),
-        (4, 5),
+        (6, 5),
+        (4, 7),
         (5, 7),
         (8, 7),
         (9, 7),
-        (10, 7),
     ] {
         precode_lens[sym] = len;
     }
-    let precode = canonical_codes(&precode_lens);
-    // Complete codes: 288 litlen (224 of 8 bits, 64 of 9), 32 offset of 5.
-    let mut litlen_lens = [8u8; 288];
-    litlen_lens[224..].fill(9);
-    let offset_lens = [5u8; 32];
-    let litlen = canonical_codes(&litlen_lens);
-
-    let mut w = BitWriter {
-        out: Vec::new(),
-        bits: 0,
-        n: 0,
-    };
-    w.put(1, 1); // final block
-    w.put(2, 2); // dynamic Huffman
-    w.put(288 - 257, 5);
-    w.put(32 - 1, 5);
-    w.put(19 - 4, 4);
-    for sym in PERMUTATION {
-        w.put(u32::from(precode_lens[sym]), 3);
-    }
-    for &len in litlen_lens.iter().chain(&offset_lens) {
-        w.put_code(precode[len as usize], 7);
-    }
-    let header_bits = 3 + 14 + 19 * 3 + 320 * 7;
-    assert_eq!(w.out.len(), header_bits / 8);
-    for sym in [b'a' as usize, b'b' as usize, 256] {
-        w.put_code(litlen[sym], u32::from(litlen_lens[sym]));
-    }
-    w.finish()
+    // Complete codes: litlen of 8 and 9 bits, offset of 4 and 5.
+    let body = [usize::from(b'a'), usize::from(b'b'), 256].map(Codeword::Litlen);
+    let litlen_lens = complete_lens(num_litlen, 8);
+    let offset_lens = complete_lens(num_offset, 4);
+    dynamic_block_stream(&precode_lens, &litlen_lens, &offset_lens, &body)
 }
 
 #[test]
 fn carry_holds_the_longest_block_header() {
-    let c = longest_header_stream();
+    let c = dynamic_header_stream(286, 30);
+    // The 2286-bit header, then `a`, `b` and end of block: 8, 8 and 9 bits.
+    assert_eq!(c.len(), (2286usize + 25).div_ceil(8));
     assert_eq!(
         one_shot(Format::Deflate, &c, 10),
         Ok((Some(b"ab".to_vec()), c.len()))
     );
     // A byte at a time, so the whole header is carried.
-    for sizes in [&[1][..], &[2, 3], &[289], &[290], &[100, 250]] {
+    for sizes in [&[1][..], &[2, 3], &[285], &[286], &[100, 250]] {
         assert_eq!(
             stream(Format::Deflate, &c, sizes, 1 << 16),
             Ok((b"ab".to_vec(), c.len()))
         );
         assert_eq!(scan(Format::Deflate, &c, sizes), Ok((2, c.len())));
     }
+}
+
+/// `c` followed by bytes, as in a git pack, so that errors near the end of
+/// the stream aren't truncation.
+fn padded(c: &[u8]) -> Vec<u8> {
+    [c, &[0; 16]].concat()
+}
+
+/// Checks that every decoder rejects the raw DEFLATE stream `c` (padded) as
+/// bad data: in one call into `out_lens` byte buffers, in pieces, scanning
+/// and into a `Vec`.
+fn assert_rejected(c: &[u8], out_lens: &[usize], what: &str) {
+    let c = &padded(c);
+    for &len in out_lens {
+        let r = one_shot(Format::Deflate, c, len);
+        assert_eq!(r, Err(Error::BadData), "{what}: one-shot into {len}");
+    }
+    for sizes in [&[1][..], &[7, 300], &[usize::MAX >> 1]] {
+        let r = stream(Format::Deflate, c, sizes, 1 << 16);
+        assert_eq!(r, Err(Error::BadData), "{what}: stream in {sizes:?}");
+        let r = scan(Format::Deflate, c, sizes);
+        assert_eq!(r, Err(Error::BadData), "{what}: scan in {sizes:?}");
+    }
+    let r = crate::decompress(Format::Deflate, c, 1 << 20);
+    assert_eq!(r, Err(Error::BadData), "{what}: Vec");
+}
+
+/// Checks that every decoder decodes the raw DEFLATE stream `c` (padded) to
+/// `out`.
+fn assert_decodes(c: &[u8], out: &[u8], what: &str) {
+    let (used, c) = (c.len(), &padded(c));
+    let r = one_shot(Format::Deflate, c, out.len());
+    assert_eq!(r, Ok((Some(out.to_vec()), used)), "{what}: one-shot");
+    for sizes in [&[1][..], &[usize::MAX >> 1]] {
+        let r = stream(Format::Deflate, c, sizes, 1 << 16);
+        assert_eq!(r, Ok((out.to_vec(), used)), "{what}: stream in {sizes:?}");
+        let r = scan(Format::Deflate, c, sizes);
+        assert_eq!(r, Ok((out.len() as u64, used)), "{what}: scan in {sizes:?}");
+    }
+}
+
+/// RFC 1951 has 286 litlen and 30 offset symbols; a dynamic block header
+/// that declares more is invalid (see the README's "Strictness"), although
+/// they have codewords in complete codes.
+#[test]
+fn a_header_with_too_many_symbols_is_rejected() {
+    for (num_litlen, num_offset) in [(287, 30), (288, 30), (286, 31), (286, 32), (288, 32)] {
+        let c = dynamic_header_stream(num_litlen, num_offset);
+        let what = format!("HLIT {num_litlen} HDIST {num_offset}");
+        assert_rejected(&c, &[2, 1000], &what);
+    }
+}
+
+/// The output of [`fixed_block_stream`] before its match.
+const FIXED_PREFIX_LEN: usize = 1 + 96 * 258;
+
+/// A raw DEFLATE stream of one fixed Huffman block: `a`, 96 matches of
+/// length 258 at offset 1 (so that 24577, the furthest offset of symbol 29,
+/// is in reach), a match of litlen symbol `len_sym` and offset symbol
+/// `offset_sym` with zero extra bits, `tail` literal `z`s and end of block.
+fn fixed_block_stream(len_sym: usize, offset_sym: u32, tail: usize) -> Vec<u8> {
+    let lens = &STATIC_LENS[..NUM_LITLEN_SYMS];
+    let codes = canonical_codes(lens);
+    let mut w = BitWriter::default();
+    let litlen = |w: &mut BitWriter, sym: usize| w.put_code(codes[sym], u32::from(lens[sym]));
+    w.put(1, 1); // final block
+    w.put(1, 2); // fixed Huffman
+    litlen(&mut w, usize::from(b'a'));
+    for _ in 0..96 {
+        litlen(&mut w, 285);
+        w.put_code(0, 5);
+    }
+    litlen(&mut w, len_sym);
+    w.put_code(offset_sym, 5);
+    if (4..30).contains(&offset_sym) {
+        w.put(0, (offset_sym - 2) / 2);
+    }
+    for _ in 0..tail {
+        litlen(&mut w, usize::from(b'z'));
+    }
+    litlen(&mut w, 256);
+    w.finish()
+}
+
+/// Litlen symbols 286 and 287 and offset symbols 30 and 31 are invalid (see
+/// the README's "Strictness"), and only the fixed codes have codewords for
+/// them. Their valid neighbors decode.
+#[test]
+fn reserved_fixed_symbols_are_rejected() {
+    // Long tails get to the symbols in the fastloop, short ones (or a short
+    // output buffer) in the tail fastloop or the generic loop, also with no
+    // room left for the match.
+    for tail in [0, 600] {
+        for (len_sym, offset_sym) in [(286, 0), (287, 0), (257, 30), (257, 31)] {
+            let c = fixed_block_stream(len_sym, offset_sym, tail);
+            let what = format!("litlen {len_sym}, offset {offset_sym}, tail {tail}");
+            let out_lens = [FIXED_PREFIX_LEN, FIXED_PREFIX_LEN + 50, 1 << 20];
+            assert_rejected(&c, &out_lens, &what);
+        }
+        for (len_sym, offset_sym, len) in [(285, 0, 258), (257, 29, 3)] {
+            let c = fixed_block_stream(len_sym, offset_sym, tail);
+            let out = [vec![b'a'; FIXED_PREFIX_LEN + len], vec![b'z'; tail]].concat();
+            let what = format!("litlen {len_sym}, offset {offset_sym}, tail {tail}");
+            assert_decodes(&c, &out, &what);
+        }
+    }
+}
+
+/// An incomplete code (empty, or of a single 1-bit codeword) is valid, but
+/// the codewords it lacks aren't (see the README's "Strictness").
+#[test]
+fn missing_codewords_are_rejected() {
+    use Codeword::{Litlen, Raw};
+    // Lengths 0 to 15 as 4-bit precode codewords.
+    let mut precode = [4; 19];
+    precode[16..].fill(0);
+    let block = |litlen: &[u8], offset: &[u8], body: &[Codeword]| {
+        dynamic_block_stream(&precode, litlen, offset, body)
+    };
+    // `a`, 256 and 257 as a complete code.
+    let mut lens = vec![0; 258];
+    (lens[usize::from(b'a')], lens[256], lens[257]) = (1, 2, 2);
+    let a = Litlen(usize::from(b'a'));
+    // An empty offset code, used or not.
+    assert_decodes(&block(&lens, &[0], &[a, Litlen(256)]), b"a", "empty unused");
+    let c = block(&lens, &[0], &[a, Litlen(257), Raw(0, 1), Litlen(256)]);
+    assert_rejected(&c, &[100], "empty offset code");
+    // One 1-bit offset codeword, for offset 1.
+    let c = block(&lens, &[1], &[a, Litlen(257), Raw(0, 1), Litlen(256)]);
+    assert_decodes(&c, b"aaaa", "single offset codeword");
+    let c = block(&lens, &[1], &[a, Litlen(257), Raw(1, 1), Litlen(256)]);
+    assert_rejected(&c, &[100], "missing offset codeword");
+    // One 1-bit offset codeword, for offset symbol 1 (offset 2).
+    let c = block(&lens, &[0, 1], &[a, a, Litlen(257), Raw(0, 1), Litlen(256)]);
+    assert_decodes(&c, b"aaaaa", "single offset codeword of symbol 1");
+    let c = block(&lens, &[0, 1], &[a, a, Litlen(257), Raw(1, 1), Litlen(256)]);
+    assert_rejected(&c, &[100], "missing offset codeword of symbol 1");
+    // One 1-bit litlen codeword: end of block.
+    let mut lens = vec![0; 257];
+    lens[256] = 1;
+    assert_decodes(
+        &block(&lens, &[0], &[Raw(0, 1)]),
+        b"",
+        "single litlen codeword",
+    );
+    let c = block(&lens, &[0], &[Raw(1, 1), Raw(0, 1)]);
+    assert_rejected(&c, &[100], "missing litlen codeword");
+}
+
+/// A litlen code without end of block makes a block that can't end. zlib
+/// rejects it in the header, before any output.
+#[test]
+fn a_litlen_code_without_end_of_block_is_rejected() {
+    let mut precode = [4; 19];
+    precode[16..].fill(0);
+    let mut lens = vec![0; 257];
+    (lens[usize::from(b'a')], lens[usize::from(b'b')]) = (1, 1);
+    let c = dynamic_block_stream(&precode, &lens, &[0], &[Codeword::Raw(0, 1); 64]);
+    assert_rejected(&c, &[0, 1, 1000], "no end of block");
+}
+
+/// zlib rejects an incomplete precode, even with a single 1-bit codeword.
+#[test]
+fn an_incomplete_precode_is_rejected() {
+    // Only precode symbol 18 (11 - 138 zeros), as codeword `0`.
+    let mut w = BitWriter::default();
+    w.put(1, 1); // final block
+    w.put(2, 2); // dynamic Huffman
+    w.put(0, 5 + 5 + 4); // 257 litlen, 1 offset and 4 precode lengths
+    for len in [0, 0, 1, 0] {
+        w.put(len, 3);
+    }
+    assert_rejected(&w.finish(), &[0, 100], "incomplete precode");
 }
 
 #[cfg(feature = "std")]
@@ -662,9 +870,9 @@ fn vec_grows_past_the_first_guess() {
 fn vec_rejects_trailing_data() {
     for format in FORMATS {
         let mut c = reference_compress(format, 2, b"hello hello hello");
-        c.push(0);
+        c.extend([0, 0]);
         let want = match format {
-            // A gzip member can't start with a zero byte.
+            // A gzip member can't start with zero bytes.
             Format::Gzip => Error::BadData,
             _ => Error::TrailingData,
         };
@@ -763,7 +971,9 @@ fn decompress_from_guess(
 
 /// Checks corrupt input fails alike in one go and through a growing buffer.
 fn assert_resumed_errors_match(format: Format, c: &[u8], max_len: usize) {
-    let want = one_shot(format, c, max_len).map(|(out, consumed)| (consumed, out.expect("room")));
+    // A flipped bit can make the output longer than `max_len`.
+    let want = one_shot(format, c, max_len)
+        .and_then(|(out, consumed)| Ok((consumed, out.ok_or(Error::InsufficientSpace)?)));
     let mut out = Vec::new();
     let got = VecDecoder {
         format,
@@ -913,4 +1123,103 @@ proptest! {
         c[i] ^= 1 << bit;
         assert_resumed_errors_match(format, &c, data.len() + 5000);
     }
+}
+
+/// Input that runs out as the output fills up is truncated, as zlib.
+#[test]
+fn a_stored_block_cut_off_at_a_full_buffer_is_truncated() {
+    let input = [0x01, 10, 0, !10, 0xFF, 1, 2, 3, 4, 5];
+    let mut buf = [0; 5];
+    let r = Decoder::new(Format::Deflate).decompress(&input, &mut buf, true);
+    assert_eq!(r, Err(Error::Truncated));
+    assert_eq!(
+        crate::decompress(Format::Deflate, &input, 5),
+        Err(Error::Truncated)
+    );
+}
+
+/// Asserts every way to decode `input` fails with `want`.
+fn assert_fails(format: Format, input: &[u8], want: Error) {
+    assert_eq!(
+        one_shot(format, input, 100).map(|_| ()),
+        Err(want),
+        "{input:x?}"
+    );
+    assert_eq!(
+        stream(format, input, &[1], 1 << 16).map(|_| ()),
+        Err(want),
+        "{input:x?}"
+    );
+    assert_eq!(
+        crate::decompress(format, input, 100),
+        Err(want),
+        "{input:x?}"
+    );
+}
+
+/// As zlib, each part of a header or trailer is checked once it is in,
+/// and the input ending before then is truncation.
+#[test]
+fn header_and_trailer_parts_are_checked_as_they_come_in() {
+    assert_fails(Format::Gzip, &[0x1F], Error::Truncated);
+    assert_fails(Format::Gzip, &[0x1F, 0x8C], Error::BadData);
+    assert_fails(Format::Gzip, &[0x1F, 0x8B, 9], Error::Truncated);
+    assert_fails(Format::Gzip, &[0x1F, 0x8B, 9, 0], Error::BadData);
+    assert_fails(Format::Gzip, &[0x1F, 0x8B, 8, 0x20], Error::BadData);
+    // zlib reads the dictionary's ID before asking for the dictionary.
+    assert_fails(Format::Zlib, &[0x78, 0x20, 0, 0, 0], Error::Truncated);
+    assert_fails(
+        Format::Zlib,
+        &[0x78, 0x20, 0, 0, 0, 0],
+        Error::PresetDictionary,
+    );
+
+    // A trailer's checksum is checked without its size.
+    let mut c = reference_compress(Format::Gzip, 6, b"hello hello hello");
+    let n = c.len();
+    c[n - 8] ^= 1;
+    assert_fails(Format::Gzip, &c[..n - 2], Error::ChecksumMismatch);
+    c[n - 8] ^= 1;
+    assert_fails(Format::Gzip, &c[..n - 2], Error::Truncated);
+}
+
+#[test]
+fn a_gzip_header_crc_is_checked() {
+    let data = b"hello hello hello";
+    let c = reference_compress(Format::Gzip, 6, data);
+    // Set FHCRC and insert the header's CRC after its fixed 10 bytes.
+    let mut header = c[..10].to_vec();
+    header[3] |= 0x02;
+    let crc = crate::checksum::crc32(0, &header) as u16;
+    let with = |crc: u16| [&header[..], &crc.to_le_bytes(), &c[10..]].concat();
+    let good = with(crc);
+    assert_eq!(
+        one_shot(Format::Gzip, &good, 100),
+        Ok((Some(data.to_vec()), good.len()))
+    );
+    assert_eq!(
+        stream(Format::Gzip, &good, &[1], 1 << 16).map(|r| r.0),
+        Ok(data.to_vec())
+    );
+    assert_eq!(
+        crate::decompress(Format::Gzip, &good, 100),
+        Ok(data.to_vec())
+    );
+    assert_fails(Format::Gzip, &with(crc ^ 1), Error::BadData);
+}
+
+/// zlib decodes every length of an empty precode as 0 from 1 bit, so the
+/// block lacks end of block, or is truncated if the input ends first.
+#[test]
+fn an_empty_precode_reads_a_bit_per_length() {
+    let mut w = BitWriter::default();
+    w.put(1, 1); // final block
+    w.put(2, 2); // dynamic Huffman
+    w.put(0, 5 + 5 + 4); // 257 litlen, 1 offset and 4 precode lengths
+    w.put(0, 12); // all 0
+    let header = w.finish();
+    // 29 header bits and 258 length bits fit in 36 bytes.
+    let stream = |len: usize| [&header[..], &vec![0; len - header.len()]].concat();
+    assert_fails(Format::Deflate, &stream(36), Error::BadData);
+    assert_fails(Format::Deflate, &stream(35), Error::Truncated);
 }

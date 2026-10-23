@@ -158,19 +158,7 @@ impl Enc {
         match self {
             Enc::Stored => crate::reference_compress(Format::Deflate, 0, data),
             Enc::Level(l) => crate::reference_compress(Format::Deflate, l as i32, data),
-            Enc::Fixed => {
-                let config = zlib_rs::DeflateConfig {
-                    window_bits: -15,
-                    strategy: zlib_rs::Strategy::Fixed,
-                    ..zlib_rs::DeflateConfig::new(6)
-                };
-                let mut out = vec![0; zlib_rs::compress_bound(data.len())];
-                let (c, rc) = zlib_rs::compress_slice(&mut out, data, config);
-                assert_eq!(rc, zlib_rs::ReturnCode::Ok, "zlib-rs compress");
-                let n = c.len();
-                out.truncate(n);
-                out
-            }
+            Enc::Fixed => crate::fixed_compress(data),
         }
     }
 
@@ -445,7 +433,7 @@ fn pack_name(path: &Path) -> String {
 /// A git pack's zlib streams in pack order (at most `max` of them), as one
 /// case for the whole pack and one per size class.
 ///
-/// Each stream's end is found with libdeflate, so a broken sirocco cannot
+/// Each stream's end is found with zlib-rs, so a broken sirocco cannot
 /// skew the cases.
 #[must_use]
 pub fn pack(path: &Path, max: usize) -> Vec<Case> {

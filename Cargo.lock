@@ -217,7 +217,6 @@ dependencies = [
  "adler32furious",
  "crc32fast",
  "criterion",
- "libdeflate-sys",
  "libdeflater",
  "miniz_oxide",
  "proptest",

@@ -1,4 +1,4 @@
-//! Differential tests: sirocco's decompressor must agree with libdeflate's
+//! Differential tests: sirocco's decompressor must agree with zlib-rs's
 //! on valid streams (output and consumed input) and on corrupt ones (which
 //! error is returned).
 
@@ -48,7 +48,7 @@ fn corpus_round_trips_at_every_level() {
 }
 
 #[test]
-fn truncated_streams_match_libdeflate() {
+fn truncated_streams_match_zlib() {
     let data = &compare::synthetic_corpus()[2].data; // text, 4 KiB
     for level in [0, 1, 6, 12] {
         for format in Format::ALL {
@@ -105,7 +105,7 @@ proptest! {
     /// Output buffers around the exact size, so that the end of the output
     /// can fall between the two literals of a double entry.
     #[test]
-    fn skewed_literals_match_libdeflate(
+    fn skewed_literals_match_zlib(
         data in skewed_literals(),
         level in 0i32..=12,
         f in 0usize..3,
@@ -125,7 +125,7 @@ proptest! {
     /// exact size: the end of the output falls inside or just after matches
     /// that the tail fastloop has to stop before or copy without overrun.
     #[test]
-    fn output_end_near_matches_libdeflate(
+    fn output_end_near_matches_zlib(
         data in mixed_data(),
         level in 0i32..=12,
         f in 0usize..3,
@@ -157,7 +157,7 @@ proptest! {
     /// Corrupts a valid stream and checks both decompressors agree on the
     /// outcome, which exercises error paths far more than random bytes do.
     #[test]
-    fn corrupted_streams_match_libdeflate(
+    fn corrupted_streams_match_zlib(
         data in mixed_data(),
         level in 0i32..=12,
         f in 0usize..3,
@@ -174,7 +174,7 @@ proptest! {
     }
 
     #[test]
-    fn random_bytes_match_libdeflate(
+    fn random_bytes_match_zlib(
         input in prop::collection::vec(any::<u8>(), 0..2000),
         out_len in 0usize..70_000,
         f in 0usize..3,
@@ -200,6 +200,43 @@ proptest! {
             prop_assert_eq!(
                 sirocco::decompress(format.ff(), &c, want.len() - 1),
                 Err(sirocco::inflate::Error::InsufficientSpace)
+            );
+        }
+    }
+}
+
+/// Corrupts fixed Huffman streams, whose codes have codewords for the
+/// symbols RFC 1951 reserves, which sirocco must reject as zlib does. Bit
+/// flips reach them rarely, so this runs many more cases than the
+/// proptests, deterministically.
+#[test]
+fn corrupted_fixed_streams_match_zlib() {
+    let mut rng = compare::Rng(0x9e37_79b9_7f4a_7c15);
+    let (mut ours, mut theirs) = (SiroccoDecoders::new(), ReferenceDecompressor::new());
+    for _ in 0..5_000 {
+        let len = 1 + (rng.next() % 3000) as usize;
+        let data: Vec<u8> = (0..len)
+            .map(|i| {
+                if rng.next().is_multiple_of(4) {
+                    rng.next() as u8
+                } else {
+                    (i % 7) as u8
+                }
+            })
+            .collect();
+        let c = compare::fixed_compress(&data);
+        for _ in 0..4 {
+            let mut c = c.clone();
+            for _ in 0..=rng.next() % 3 {
+                let bit = rng.next() as usize % (8 * c.len());
+                c[bit / 8] ^= 1 << (bit % 8);
+            }
+            c.extend_from_slice(&[0; 16]);
+            let (out_len, f) = (len + 16, Format::Deflate);
+            assert_agree(
+                &sirocco_decompress(&mut ours, f, &c, out_len),
+                &theirs.decompress(f, &c, out_len),
+                &format!("{} input bytes", c.len()),
             );
         }
     }

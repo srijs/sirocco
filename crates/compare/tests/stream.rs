@@ -1,5 +1,5 @@
 //! Differential tests for streaming: fed in pieces, through a buffer smaller
-//! than the output, sirocco must agree with libdeflate's one-shot decoder.
+//! than the output, sirocco must agree with zlib-rs's one-shot decoder.
 
 use compare::{
     assert_agree, reference_compress, sirocco_stream as stream, Format, Outcome,
@@ -81,7 +81,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn chunked_matches_libdeflate(
+    fn chunked_matches_zlib(
         data in mixed_data(),
         level in 0i32..=12,
         f in 0usize..3,
@@ -92,7 +92,7 @@ proptest! {
     }
 
     #[test]
-    fn corrupted_chunked_matches_libdeflate(
+    fn corrupted_chunked_matches_zlib(
         data in mixed_data(),
         level in 0i32..=12,
         f in 0usize..3,

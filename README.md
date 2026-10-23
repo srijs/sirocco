@@ -18,7 +18,7 @@ Fast DEFLATE, zlib and gzip decompression in pure Rust.
   code compiled for the CPU features detected at runtime.
 - **`no_std`.** Decoding, streaming included, works without an allocator.
 - **Tested.** Differentially tested (with proptest) and fuzzed against
-  libdeflate.
+  zlib-rs.
 
 Relies on hardware-accelerated CRC-32 from [crc32fast](https://crates.io/crates/crc32fast)
 and Adler-32 from [adler32furious](https://crates.io/crates/adler32furious).
@@ -91,6 +91,13 @@ The minimum supported Rust version is 1.89.
 - `sirocco::decompress` reads every member of a multi-member gzip file (as
   `gzip -d` does); `inflate::Decoder`, `Scanner` and `Reader` read one member
   at a time.
+
+### Strictness
+
+While libdeflate tends to be more lenient, sirocco aims for full zlib
+compatibility, both in terms of how it validates and rejects, as well as which
+errors take preference. There are differential fuzz tests to cover this. Any
+divergence should be considered a bug.
 
 ## Performance
 

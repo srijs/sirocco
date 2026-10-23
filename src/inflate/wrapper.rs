@@ -16,13 +16,16 @@ enum Field {
     /// The fixed part: zlib's CMF and FLG, or gzip's ID1, ID2, CM, FLG,
     /// MTIME, XFL and OS.
     Fixed,
+    /// zlib's DICTID, which zlib reads before it reports that the stream
+    /// needs a preset dictionary.
+    DictId,
     /// The 2-byte FEXTRA length.
     ExtraLen,
     /// FEXTRA bytes left to skip.
     Extra(usize),
     Name,
     Comment,
-    /// The 2-byte header CRC (not checked).
+    /// The 2-byte header CRC.
     HeaderCrc,
     Done,
 }
@@ -35,6 +38,11 @@ pub(super) struct HeaderParser {
     buf: [u8; 10],
     buf_len: usize,
     gzip_flags: u8,
+    /// The CRC-32 of the gzip header so far, which FHCRC records the low
+    /// half of.
+    crc: u32,
+    /// Whether `crc` covers all of the header it should.
+    crc_done: bool,
 }
 
 impl HeaderParser {
@@ -44,6 +52,8 @@ impl HeaderParser {
             buf: [0; 10],
             buf_len: 0,
             gzip_flags: 0,
+            crc: 0,
+            crc_done: false,
         }
     }
 
@@ -65,6 +75,29 @@ impl HeaderParser {
         input: &[u8],
         ip: &mut usize,
     ) -> Result<bool, Error> {
+        let start = *ip;
+        let r = self.parse_fields(format, input, ip, start);
+        if format == Format::Gzip {
+            self.update_crc(&input[start..*ip]);
+        }
+        r
+    }
+
+    fn update_crc(&mut self, header: &[u8]) {
+        if !self.crc_done {
+            self.crc = crate::checksum::crc32(self.crc, header);
+        }
+    }
+
+    /// [`parse`](Self::parse), where `input[start..*ip]` is the header this
+    /// call has read, not yet in `crc`.
+    fn parse_fields(
+        &mut self,
+        format: Format,
+        input: &[u8],
+        ip: &mut usize,
+        start: usize,
+    ) -> Result<bool, Error> {
         let bad = Err(Error::BadData);
         loop {
             match self.field {
@@ -75,22 +108,38 @@ impl HeaderParser {
                         if !self.collect(input, ip, 2) {
                             return Ok(false);
                         }
-                        zlib_header([self.buf[0], self.buf[1]])?;
-                        self.field = Field::Done;
+                        match zlib_header([self.buf[0], self.buf[1]]) {
+                            Err(Error::PresetDictionary) => self.field = Field::DictId,
+                            r => {
+                                r?;
+                                self.field = Field::Done;
+                            }
+                        }
                     }
                     Format::Gzip => {
-                        if !self.collect(input, ip, 10) {
-                            return Ok(false);
-                        }
-                        let b = &self.buf;
-                        if b[0] != 0x1F || b[1] != 0x8B || b[2] != 8 || b[3] & FRESERVED != 0 {
+                        // As zlib, check each part once it is in: the magic
+                        // number, then CM and FLG.
+                        let complete = self.collect(input, ip, 10);
+                        let b = &self.buf[..self.buf_len];
+                        if b.len() >= 2 && (b[0] != 0x1F || b[1] != 0x8B)
+                            || b.len() >= 4 && (b[2] != 8 || b[3] & FRESERVED != 0)
+                        {
                             return bad;
                         }
-                        self.gzip_flags = b[3];
+                        if !complete {
+                            return Ok(false);
+                        }
+                        self.gzip_flags = self.buf[3];
                         self.buf_len = 0;
                         self.field = Field::ExtraLen;
                     }
                 },
+                Field::DictId => {
+                    if !self.collect(input, ip, 6) {
+                        return Ok(false);
+                    }
+                    return Err(Error::PresetDictionary);
+                }
                 Field::ExtraLen => {
                     if self.gzip_flags & FEXTRA == 0 {
                         self.field = Field::Name;
@@ -129,8 +178,19 @@ impl HeaderParser {
                     self.field = next;
                 }
                 Field::HeaderCrc => {
-                    if self.gzip_flags & FHCRC != 0 && !self.collect(input, ip, 2) {
-                        return Ok(false);
+                    if self.gzip_flags & FHCRC != 0 {
+                        // As zlib, check it: the low half of the CRC-32 of
+                        // the header before it.
+                        if !self.crc_done {
+                            self.update_crc(&input[start..*ip]);
+                            self.crc_done = true;
+                        }
+                        if !self.collect(input, ip, 2) {
+                            return Ok(false);
+                        }
+                        if u16::from_le_bytes([self.buf[0], self.buf[1]]) != self.crc as u16 {
+                            return bad;
+                        }
                     }
                     self.field = Field::Done;
                 }
@@ -155,35 +215,35 @@ pub(super) fn zlib_header(hdr: [u8; 2]) -> Result<(), Error> {
     }
 }
 
+/// Where the DEFLATE body of the zlib stream at the start of `input`
+/// starts. zlib's fixed 2 bytes skip the general parser, which matters for
+/// streams as small as most git objects.
+fn zlib_body_start(input: &[u8]) -> Result<usize, Error> {
+    let Some(&hdr) = input.first_chunk() else {
+        return Err(Error::Truncated);
+    };
+    match zlib_header(hdr) {
+        // zlib reads the dictionary's ID before it asks for the dictionary.
+        Err(Error::PresetDictionary) if input.len() < 6 => Err(Error::Truncated),
+        r => r.map(|()| 2),
+    }
+}
+
 /// Where the DEFLATE body of the `format` stream at the start of `input`
-/// starts, and the furthest it can end: before room for the trailer.
-/// `input` must hold the whole header. zlib's fixed 2 bytes skip the general
-/// parser, which matters for streams as small as most git objects.
-#[cfg_attr(not(feature = "alloc"), allow(dead_code))]
-pub(super) fn body_bounds(format: Format, input: &[u8]) -> Result<(usize, usize), Error> {
-    let body_end = input
-        .len()
-        .checked_sub(trailer_len(format))
-        .ok_or(Error::BadData)?;
-    let header = &input[..body_end];
-    let start = match format {
-        Format::Deflate => 0,
-        Format::Zlib => match header.first_chunk() {
-            Some(&hdr) => {
-                zlib_header(hdr)?;
-                2
-            }
-            None => return Err(Error::BadData),
-        },
+/// starts.
+#[inline]
+pub(super) fn body_start(format: Format, input: &[u8]) -> Result<usize, Error> {
+    match format {
+        Format::Deflate => Ok(0),
+        Format::Zlib => zlib_body_start(input),
         Format::Gzip => {
             let mut pos = 0;
-            if !HeaderParser::new().parse(format, header, &mut pos)? {
-                return Err(Error::BadData);
+            if !HeaderParser::new().parse(format, input, &mut pos)? {
+                return Err(Error::Truncated);
             }
-            pos
+            Ok(pos)
         }
-    };
-    Ok((start, body_end))
+    }
 }
 
 /// The trailer's size in bytes.
@@ -246,24 +306,29 @@ impl Check {
         self.len += n as u64;
     }
 
-    /// Checks the trailer at `input[pos..]`, which must hold all of it.
-    /// Returns where it ends.
-    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    /// Checks the trailer at `input[pos..]`. Returns where it ends.
     pub(super) fn verify_at(&self, input: &[u8], pos: usize) -> Result<usize, Error> {
         let end = pos + trailer_len(self.format);
-        self.verify(&input[pos..end])?;
+        let t = &input[pos..end.min(input.len())];
+        self.verify(t)?;
+        if t.len() < trailer_len(self.format) {
+            return Err(Error::Truncated);
+        }
         Ok(end)
     }
 
-    /// Checks the trailer, `trailer_len(format)` bytes.
+    /// Checks the trailer, or as much of it as `t` holds: as zlib, each
+    /// 4-byte field once it is in.
     pub(super) fn verify(&self, t: &[u8]) -> Result<(), Error> {
-        let word = |i: usize| [t[i], t[i + 1], t[i + 2], t[i + 3]];
+        let word = |i: usize| t.get(i..i + 4).map(|w| [w[0], w[1], w[2], w[3]]);
         let ok = match self.format {
             Format::Deflate => true,
-            Format::Zlib => self.len_only || u32::from_be_bytes(word(0)) == self.value,
+            Format::Zlib => {
+                self.len_only || word(0).is_none_or(|w| u32::from_be_bytes(w) == self.value)
+            }
             Format::Gzip => {
-                (self.len_only || u32::from_le_bytes(word(0)) == self.value)
-                    && u32::from_le_bytes(word(4)) == self.len as u32
+                (self.len_only || word(0).is_none_or(|w| u32::from_le_bytes(w) == self.value))
+                    && word(4).is_none_or(|w| u32::from_le_bytes(w) == self.len as u32)
             }
         };
         if ok {

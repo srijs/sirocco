@@ -16,7 +16,6 @@ adler32furious.workspace = true
 crc32fast = { workspace = true, features = ["std"] }
 sirocco = { path = "../.." }
 libdeflater = "1.26"
-libdeflate-sys = "1.26"
 miniz_oxide = "0.9"
 zenflate = { version = "0.4", optional = true }
 zlib-rs = "0.6"

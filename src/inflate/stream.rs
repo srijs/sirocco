@@ -2,7 +2,7 @@
 
 use super::decode::{self, Resume, Status};
 use super::tables::Tables;
-use super::wrapper::{trailer_len, zlib_header, Check, HeaderParser};
+use super::wrapper::{body_start, trailer_len, Check, HeaderParser};
 use super::Error;
 use crate::Format;
 
@@ -10,7 +10,7 @@ use crate::Format;
 pub(super) const WINDOW: usize = 32 * 1024;
 
 /// Room for input cut off mid-symbol or mid-block-header, which the decoder
-/// needs again. The longest is a dynamic block header: 290 bytes (see
+/// needs again. The longest is a dynamic block header: 286 bytes (see
 /// `carry_holds_the_longest_block_header`).
 const CARRY_LEN: usize = 1024;
 
@@ -176,33 +176,13 @@ impl<const WRITE: bool> Core<WRITE> {
     #[inline(always)]
     fn whole(&mut self, input: &[u8], buf: &mut [u8]) -> Result<Run, Error> {
         let format = self.format;
-        // Leave room for the trailer, so a stream too short for one is
-        // truncated (as libdeflate finds).
-        let Some(body_end) = input.len().checked_sub(trailer_len(format)) else {
-            return Err(Error::Truncated);
-        };
-        let start = match format {
-            Format::Deflate => 0,
-            // Skip the general parser: it shows on small git objects.
-            Format::Zlib => match input[..body_end].first_chunk() {
-                Some(&hdr) => {
-                    zlib_header(hdr)?;
-                    2
-                }
-                None => return Err(Error::Truncated),
-            },
-            Format::Gzip => {
-                let mut pos = 0;
-                if !HeaderParser::new().parse(format, &input[..body_end], &mut pos)? {
-                    return Err(Error::Truncated);
-                }
-                pos
-            }
-        };
+        // The header, body and trailer in turn, each from all of the input
+        // left, so that an error is found where zlib finds it.
+        let start = body_start(format, input)?;
         let out_len = if WRITE { buf.len() } else { usize::MAX / 2 };
         let r = decode::run::<false, WRITE>(
             &mut self.tables,
-            &input[start..body_end],
+            &input[start..],
             buf,
             out_len,
             None,
@@ -223,11 +203,7 @@ impl<const WRITE: bool> Core<WRITE> {
         if let Status::Full(r) = r {
             return Ok(self.carry_on(r, check, used, written));
         }
-        let Some(trailer) = input.get(used..used + trailer_len(format)) else {
-            return Err(Error::Truncated);
-        };
-        check.verify(trailer)?;
-        let consumed = used + trailer.len();
+        let consumed = check.verify_at(input, used)?;
         self.stage = Stage::Done;
         self.pos = written;
         self.total_in = consumed as u64;
@@ -283,10 +259,11 @@ impl<const WRITE: bool> Core<WRITE> {
                     Step::Done => self.stage = Stage::Trailer,
                 },
                 Stage::Trailer => {
-                    if !self.collect_trailer(input, ip) {
+                    let complete = self.collect_trailer(input, ip);
+                    self.check.verify(&self.trailer[..self.trailer_len])?;
+                    if !complete {
                         return need_input(end);
                     }
-                    self.check.verify(&self.trailer[..self.trailer_len])?;
                     return Ok(Stop::Done);
                 }
                 Stage::Done => return Ok(Stop::Done),
