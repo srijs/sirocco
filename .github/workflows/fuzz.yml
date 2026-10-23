@@ -1,0 +1,94 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Every target in fuzz/Cargo.toml, so a new one is fuzzed without editing
+  # this file.
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        run: |
+          targets=$(cargo metadata --manifest-path fuzz/Cargo.toml --no-deps --format-version 1 \
+            | jq -c '[.packages[0].targets[] | select(.kind == ["bin"]) | .name]')
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    name: ${{ matrix.fuzz }} / ${{ matrix.target }}
+    needs: targets
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        fuzz: ${{ fromJSON(needs.targets.outputs.targets) }}
+        # Both, for the x86 and AArch64 SIMD paths.
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+    env:
+      CORPUS: fuzz/corpus/${{ matrix.fuzz }}
+      ARTIFACT: fuzz-corpus-${{ matrix.fuzz }}-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Corpus from the last run on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$CORPUS"
+          runs=$(gh run list --workflow fuzz.yml --branch main --status completed \
+            --limit 10 --json databaseId --jq '.[].databaseId' || true)
+          for run in $runs; do
+            if gh run download "$run" --name "$ARTIFACT" --dir "$CORPUS"; then
+              echo "Starting from run $run"
+              break
+            fi
+          done
+          echo "$(find "$CORPUS" -type f | wc -l) inputs"
+      # install-action's cargo-fuzz is built for musl, which it would
+      # otherwise build the fuzzers for: hence --target.
+      - name: Build
+        id: build
+        run: cargo fuzz build ${{ matrix.fuzz }} --target ${{ matrix.target }}
+      - name: Fuzz
+        run: cargo fuzz run ${{ matrix.fuzz }} --target ${{ matrix.target }} -- -max_total_time=2700
+      - name: Minimize the corpus
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          cargo fuzz cmin ${{ matrix.fuzz }} --target ${{ matrix.target }}
+          echo "$(find "$CORPUS" -type f | wc -l) inputs"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ env.CORPUS }}
+          retention-days: 90
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: fuzz-crash-${{ matrix.fuzz }}-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
