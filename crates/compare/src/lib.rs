@@ -449,3 +449,26 @@ pub fn sirocco_stream(format: Format, input: &[u8], ins: &[usize], buf_len: usiz
     }
     unreachable!()
 }
+
+/// Scans `input` with sirocco's `Scanner` in pieces of the `ins` sizes
+/// (cycled): the input it used and the output length, or the error.
+pub fn sirocco_scan(format: Format, input: &[u8], ins: &[usize]) -> Result<(usize, u64), Outcome> {
+    assert!(
+        ins.iter().all(|&n| n > 0),
+        "sirocco_scan needs piece sizes above 0"
+    );
+    let mut s = sirocco::inflate::Scanner::new(format.ff());
+    let mut ip = 0usize;
+    for step in 0.. {
+        let end = ip.saturating_add(ins[step % ins.len()]).min(input.len());
+        match s.scan(&input[ip..end], end == input.len()) {
+            Ok(Some(used)) => return Ok((ip + used, s.total_out())),
+            Ok(None) => {
+                assert!(end < input.len(), "not done at the end of the input");
+                ip = end;
+            }
+            Err(e) => return Err(error_outcome(e)),
+        }
+    }
+    unreachable!()
+}

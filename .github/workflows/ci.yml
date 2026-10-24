@@ -8,6 +8,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # The same proptest cases on every run, so that a failure is the commit's.
+  # The nightly fuzz workflow explores with random seeds.
+  PROPTEST_RNG_SEED: "1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -201,12 +204,13 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      - name: Fuzz each target briefly
+      - name: Run each target
         run: |
           # install-action's cargo-fuzz is built for musl, which it would
-          # otherwise build the fuzzers for.
+          # otherwise build the fuzzers for. A fixed seed and run count, so
+          # that a rerun does the same; the nightly fuzz workflow explores.
           for t in $(cargo fuzz list); do
-            cargo fuzz run "$t" --target x86_64-unknown-linux-gnu -- -max_total_time=60
+            cargo fuzz run "$t" --target x86_64-unknown-linux-gnu -- -seed=1 -runs=10000
           done
       - uses: actions/upload-artifact@v7
         if: failure()

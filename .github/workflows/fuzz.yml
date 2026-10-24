@@ -92,3 +92,28 @@ jobs:
           name: fuzz-crash-${{ matrix.fuzz }}-${{ matrix.target }}
           path: fuzz/artifacts/
           if-no-files-found: ignore
+
+  # The proptests with new random seeds, until the time is up. CI runs them
+  # with a fixed one.
+  proptest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --release --no-run
+      - name: Random seeds
+        run: |
+          while [ "$SECONDS" -lt 2700 ]; do
+            seed=$(od -An -N8 -tu8 /dev/urandom | tr -d ' ')
+            echo "::group::PROPTEST_RNG_SEED=$seed"
+            if ! PROPTEST_RNG_SEED=$seed cargo test --workspace --release; then
+              echo "::endgroup::"
+              echo "::error::Failed with PROPTEST_RNG_SEED=$seed"
+              exit 1
+            fi
+            echo "::endgroup::"
+          done

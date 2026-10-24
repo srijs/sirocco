@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use proptest::prelude::*;
 
 use super::decode::PRECODE_LENS_PERMUTATION;
+use super::stream::WINDOW;
 use super::tables::{NUM_LITLEN_SYMS, STATIC_LENS};
 use super::*;
 use crate::Format;
@@ -49,6 +50,15 @@ fn stream(
     in_sizes: &[usize],
     buf_len: usize,
 ) -> Result<(Vec<u8>, usize), Error> {
+    // Without these, a bad generator looks like a decoder bug.
+    assert!(
+        buf_len > WINDOW,
+        "stream() needs a buffer longer than the window to make room"
+    );
+    assert!(
+        in_sizes.iter().any(|&n| n > 0),
+        "stream() needs a piece size above 0"
+    );
     let mut d = Decoder::new(format);
     let mut buf = vec![0; buf_len];
     let (mut pos, mut out, mut stuck) = (0, Vec::new(), 0);
@@ -115,6 +125,8 @@ fn cases() -> u32 {
     }
 }
 
+/// Up to a few hundred KB: proptest inputs stay small enough to shrink to
+/// something readable, and long streams have their own tests.
 fn data() -> impl Strategy<Value = Vec<u8>> {
     prop_oneof![
         prop::collection::vec(any::<u8>(), 0..2000),
@@ -129,7 +141,7 @@ fn data() -> impl Strategy<Value = Vec<u8>> {
                 prop::collection::vec(any::<u8>(), 0..80_000),
                 0usize..33_000
             ),
-            1..4
+            1..3
         )
         .prop_map(|runs| {
             let mut v = Vec::new();
@@ -140,18 +152,12 @@ fn data() -> impl Strategy<Value = Vec<u8>> {
             }
             v
         }),
-        // Many times the smallest streaming buffer.
-        (any::<u64>(), 0usize..1_500_000).prop_map(|(mut x, n)| {
-            (0..n)
-                .map(|_| {
-                    x = x
-                        .wrapping_mul(6_364_136_223_846_793_005)
-                        .wrapping_add(1_442_695_040_888_963_407);
-                    b"aaaaabbbccd \n"[(x >> 60) as usize % 13]
-                })
-                .collect()
-        }),
     ]
+}
+
+/// The levels that differ: `reference_compress` caps them at 10.
+fn levels() -> core::ops::RangeInclusive<i32> {
+    0..=10
 }
 
 /// Smaller data, for the many-case tests.
@@ -167,24 +173,33 @@ fn small_data() -> impl Strategy<Value = Vec<u8>> {
     .prop_map(|chunks| chunks.concat())
 }
 
+/// Piece sizes, one of them above 0 so that the input gets used.
 fn in_sizes() -> impl Strategy<Value = Vec<usize>> {
-    prop::collection::vec(
+    let size = || {
         prop_oneof![
             0usize..4,
             1usize..300,
             300usize..70_000,
             Just(usize::MAX >> 1)
-        ],
-        1..6,
+        ]
+    };
+    let nonzero = size().prop_map(|n| n.max(1));
+    (
+        prop::collection::vec(size(), 0..5),
+        nonzero,
+        any::<prop::sample::Index>(),
     )
-    .prop_filter("some input", |v| v.iter().any(|&n| n > 0))
+        .prop_map(|(mut v, n, at)| {
+            v.insert(at.index(v.len() + 1), n);
+            v
+        })
 }
 
 fn buf_len() -> impl Strategy<Value = usize> {
     prop_oneof![
-        // The least that can make room: just over the 32 KiB window.
-        Just((32usize << 10) + 1),
-        (32usize << 10)..(64 << 10) + 70_000,
+        // The least that can make room: just over the window.
+        Just(WINDOW + 1),
+        WINDOW + 1..(64 << 10) + 70_000,
         Just(1 << 20),
     ]
 }
@@ -1007,7 +1022,7 @@ proptest! {
     #[test]
     fn chunked_matches_one_shot(
         data in data(),
-        level in 0i32..=12,
+        level in levels(),
         f in 0usize..3,
         in_sizes in in_sizes(),
         buf_len in buf_len(),
@@ -1024,55 +1039,9 @@ proptest! {
         prop_assert_eq!(scan(format, &c, &in_sizes), Ok((data.len() as u64, len)));
     }
 
-    #[test]
-    fn chunked_errors_match_one_shot(
-        data in prop::collection::vec(0u8..8, 0..20_000),
-        level in 0i32..=12,
-        f in 0usize..3,
-        flips in prop::collection::vec((any::<prop::sample::Index>(), 0u8..8), 1..4),
-        in_sizes in in_sizes(),
-        buf_len in buf_len(),
-    ) {
-        let format = FORMATS[f];
-        let mut c = reference_compress(format, level, &data);
-        for (i, bit) in flips {
-            let i = i.index(c.len());
-            c[i] ^= 1 << bit;
-        }
-        // DEFLATE expands at most 1032x.
-        let room = c.len() * 1032;
-        let want = one_shot(format, &c, room);
-        let got = stream(format, &c, &in_sizes, buf_len.max(room));
-        match (&want, &got) {
-            (Ok((Some(w), wc)), Ok((g, gc))) => prop_assert!(w == g && wc == gc),
-            (Err(_), Err(_)) => {}
-            _ => prop_assert!(false, "one-shot {:?} vs stream {:?}",
-                want.as_ref().map(|w| (w.0.as_ref().map(Vec::len), w.1)),
-                got.as_ref().map(|g| (g.0.len(), g.1))),
-        }
-        // Scanning fails alike, short of the checksums.
-        let scanned = scan(format, &c, &in_sizes);
-        match &want {
-            Ok((Some(w), wc)) => prop_assert_eq!(scanned, Ok((w.len() as u64, *wc))),
-            // The checksum may also be all of a cut-off trailer, which then
-            // looks truncated.
-            Err(Error::ChecksumMismatch) => prop_assert!(
-                matches!(scanned, Ok(_) | Err(Error::ChecksumMismatch | Error::Truncated)),
-                "{:?}", scanned
-            ),
-            // One-shot ends the body before the trailer; scanning can't, so a
-            // corrupt stream can be truncated to one and bad data to the other.
-            Err(e @ (Error::BadData | Error::Truncated)) => prop_assert!(
-                matches!(scanned, Err(Error::BadData | Error::Truncated)), "{:?} vs {:?}", e, scanned
-            ),
-            Err(e) => prop_assert_eq!(scanned, Err(*e)),
-            Ok((None, _)) => unreachable!(),
-        }
-    }
-
     /// A short buffer is filled with the start of the output.
     #[test]
-    fn short_buffers_get_the_start(data in small_data(), level in 0i32..=12, f in 0usize..3, len in 0usize..600) {
+    fn short_buffers_get_the_start(data in small_data(), level in levels(), f in 0usize..3, len in 0usize..600) {
         let format = FORMATS[f];
         let c = reference_compress(format, level, &data);
         let mut buf = vec![0; len];
@@ -1104,7 +1073,7 @@ proptest! {
     /// Stopping before a literal, a match or a stored block and carrying on
     /// in a bigger buffer gives the same output as one big buffer.
     #[test]
-    fn resumed_decode_matches(data in small_data(), level in 0i32..=12, f in 0usize..3, guess in 0usize..64) {
+    fn resumed_decode_matches(data in small_data(), level in levels(), f in 0usize..3, guess in 0usize..64) {
         let format = FORMATS[f];
         let c = reference_compress(format, level, &data);
         prop_assert_eq!(decompress_from_guess(format, &c, data.len(), guess), Ok(data.clone()));
@@ -1119,7 +1088,7 @@ proptest! {
     /// Corrupt input gives the same error whether or not the decode had to
     /// resume along the way.
     #[test]
-    fn resumed_decode_errors_match(data in small_data(), level in 0i32..=12, f in 0usize..3, flip in any::<prop::sample::Index>(), bit in 0u8..8) {
+    fn resumed_decode_errors_match(data in small_data(), level in levels(), f in 0usize..3, flip in any::<prop::sample::Index>(), bit in 0u8..8) {
         let format = FORMATS[f];
         let mut c = reference_compress(format, level, &data);
         let i = flip.index(c.len());
@@ -1240,4 +1209,60 @@ fn a_leading_repeat_is_checked_after_its_count() {
         &[&input[..], &[0]].concat(),
         Error::BadData,
     );
+}
+
+/// A stream many times the smallest streaming buffer, through buffers from
+/// just over the window up.
+#[test]
+fn long_streams_match_one_shot() {
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    let data: Vec<u8> = (0..1_500_000)
+        .map(|_| {
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            b"aaaaabbbccd \n"[(x >> 60) as usize % 13]
+        })
+        .collect();
+    for format in FORMATS {
+        for level in [0, 1, 6, 10] {
+            let c = reference_compress(format, level, &data);
+            for (in_sizes, buf_len) in [
+                (&[usize::MAX >> 1][..], WINDOW + 1),
+                (&[1, 300, 65_536][..], (64 << 10) + 4099),
+                (&[4096][..], 1 << 20),
+            ] {
+                let r = stream(format, &c, in_sizes, buf_len);
+                assert!(
+                    r == Ok((data.clone(), c.len())),
+                    "{format:?} level {level}, {in_sizes:?}, buffer {buf_len}"
+                );
+            }
+        }
+    }
+}
+
+/// A buffer no longer than the window fills up with history that later
+/// matches may need, so `make_room` can't free any of it.
+#[test]
+fn a_window_sized_buffer_cannot_make_room() {
+    let data: Vec<u8> = (0..100_000u32)
+        .map(|i| (i % 251) as u8 ^ (i / 1000) as u8)
+        .collect();
+    for format in FORMATS {
+        let c = reference_compress(format, 6, &data);
+        let mut d = Decoder::new(format);
+        let mut buf = vec![0; WINDOW];
+        let p = d.decompress(&c, &mut buf, true).unwrap();
+        assert!(p.full && !p.done, "{format:?}");
+        let consumed = p.consumed;
+        assert_eq!(buf, &data[..WINDOW]);
+        assert_eq!(d.make_room(&mut buf), 0, "{format:?}");
+        // One byte more is enough to go on.
+        buf.push(0);
+        assert_eq!(d.make_room(&mut buf), 0, "{format:?}");
+        let p = d.decompress(&c[consumed..], &mut buf, true).unwrap();
+        assert_eq!(p.output, &data[WINDOW..=WINDOW], "{format:?}");
+        assert_eq!(d.make_room(&mut buf), 1, "{format:?}");
+    }
 }

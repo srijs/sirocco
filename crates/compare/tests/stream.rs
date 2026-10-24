@@ -2,19 +2,25 @@
 //! than the output, sirocco must agree with zlib-rs's one-shot decoder.
 
 use compare::{
-    assert_agree, reference_compress, sirocco_stream as stream, Format, Outcome,
+    assert_agree, reference_compress, sirocco_scan, sirocco_stream as stream, Format, Outcome,
     ReferenceDecompressor,
 };
 use proptest::prelude::*;
 
 fn check_same(format: Format, input: &[u8], ins: &[usize], buf_len: usize) {
     let ours = stream(format, input, ins, buf_len);
-    let theirs = ReferenceDecompressor::new().decompress(format, input, 4 << 20);
+    let theirs = ReferenceDecompressor::new().decompress(format, input, room(input));
     let what = format!(
         "{format:?}, {} input bytes, ins {ins:?}, buffer {buf_len}",
         input.len()
     );
     assert_agree(&ours, &theirs, &what);
+}
+
+/// Output room for anything `input` can decode to: DEFLATE expands at most
+/// 1032x, and sirocco's stream has no limit.
+fn room(input: &[u8]) -> usize {
+    input.len() * 1032 + 1
 }
 
 /// From the smallest streaming buffer up.
@@ -107,5 +113,30 @@ proptest! {
             c[i] ^= 1 << bit;
         }
         check_same(format, &c, &ins, BUF_LENS[buf]);
+    }
+
+    /// The scanner stops where zlib does, with the same error, short of the
+    /// checksums it can't check.
+    #[test]
+    fn corrupted_scans_match_zlib(
+        data in mixed_data(),
+        level in 0i32..=12,
+        f in 0usize..3,
+        flips in prop::collection::vec((any::<prop::sample::Index>(), 0u8..8), 0..4),
+        ins in sizes(5000),
+    ) {
+        let format = Format::ALL[f];
+        let mut c = reference_compress(format, level, &data);
+        for (i, bit) in flips {
+            let i = i.index(c.len());
+            c[i] ^= 1 << bit;
+        }
+        let ours = sirocco_scan(format, &c, &ins);
+        match ReferenceDecompressor::new().decompress(format, &c, room(&c)) {
+            Outcome::Ok(used, out) => prop_assert_eq!(ours, Ok((used, out.len() as u64))),
+            // Maybe only the checksum is wrong.
+            Outcome::BadData if format != Format::Deflate => {}
+            theirs => prop_assert_eq!(ours, Err(theirs)),
+        }
     }
 }

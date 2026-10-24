@@ -491,8 +491,9 @@ fn need_input(end: bool) -> Result<Stop, Error> {
 ///
 /// When [`Progress::full`] is set, the stream needs room: grow the buffer, or
 /// call [`make_room`](Self::make_room) to move the last 32 KiB to the front.
-/// The decoder never moves anything itself. Streaming through a fixed buffer
-/// is fastest with 256 KiB or more.
+/// The decoder never moves anything itself. A fixed buffer must be longer
+/// than 32 KiB, or `make_room` frees nothing; streaming through one is
+/// fastest with 256 KiB or more.
 ///
 /// ```
 /// use sirocco::{inflate::Decoder, Format};
