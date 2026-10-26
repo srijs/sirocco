@@ -65,11 +65,13 @@ encoder! {
 /// ```
 ///
 /// Most of its memory is its tables, [`TABLES_LEN`](super::TABLES_LEN)
-/// `u16`s (about 350 KiB), for finding matches and holding the block being
-/// built. [`new`](Encoder::new) (with the `alloc` feature) allocates them,
-/// and nothing else is ever allocated; [`with_tables`](Self::with_tables)
-/// takes your own. The rest is a few KiB inline. Reuse an encoder across
-/// streams: once a stream is done, the next call starts a new one.
+/// `u16`s (about 340 KiB), for finding matches and holding the block being
+/// built. They are kept apart from the encoder, which is a few KiB, so that
+/// they are never on the stack: [`new`](Encoder::new) (with the `alloc`
+/// feature) allocates them zeroed, and nothing else is ever allocated;
+/// [`with_tables`](Self::with_tables) takes memory of your own. Reuse an
+/// encoder across streams: once a stream is done, the next call starts a new
+/// one.
 ///
 /// # The buffer
 ///
@@ -219,15 +221,16 @@ impl<T> Encoder<T> {
     /// a `&mut [u16]`, a `Box<[u16]>` or a `Vec<u16>`, say. Their contents
     /// don't matter.
     ///
-    /// [`new`](Encoder::new) is simpler where it works. Tables of your own
-    /// are for:
+    /// [`new`](Encoder::new) is simpler where it works. Taking the tables
+    /// apart from the encoder lets them live anywhere without ever being
+    /// built on the stack, or needing `unsafe` code to avoid it:
     ///
-    /// - No allocator: keep the tables in a `static`, or wherever memory
-    ///   for them is, while the encoder itself stays a few KiB.
-    /// - Allocating them yourself: fallibly (with `Vec::try_reserve`), from
-    ///   an arena, or in memory mapped some special way.
-    /// - Borrowing them: from scratch memory used for other things too, or
-    ///   for one encoder after another.
+    /// - Allocated your way: fallibly (with `Vec::try_reserve`), from an
+    ///   arena, or in memory mapped some special way.
+    /// - Without an allocator: in a `static`, or wherever memory for them
+    ///   is.
+    /// - Borrowed: from scratch memory used for other things too, or for
+    ///   one encoder after another.
     ///
     /// To change format or level, or keep a pool of tables for encoders of
     /// different settings, move one encoder's tables to the next with

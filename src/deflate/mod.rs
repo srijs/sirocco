@@ -35,7 +35,7 @@ mod writer;
 
 pub use encoder::{Encoder, Progress};
 
-/// The `u16`s an [`Encoder`]'s tables hold, about 350 KiB.
+/// The `u16`s an [`Encoder`]'s tables hold, about 340 KiB.
 pub const TABLES_LEN: usize = parse::TABLES_LEN;
 
 /// The smallest fixed buffer that [`Encoder::make_room`] can always free
