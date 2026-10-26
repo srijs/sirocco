@@ -10,10 +10,10 @@
 //! compresses about as well as zlib does at that level, in much less time.
 //! The output is a standard stream that any inflater reads.
 //!
-//! The compressor follows libdeflate's: hash chains (or a hash table, at
-//! level 1) searched greedily or lazily, blocks of up to 64 KiB ended where
-//! the statistics of the data change, and for each block, whichever of a
-//! dynamic, static or stored block is smallest.
+//! The compressor follows libdeflate's: a hash table (at levels 1 to 3) or
+//! hash chains searched greedily or lazily, blocks of up to 64 KiB ended
+//! where the statistics of the data change, and for each block, whichever
+//! of a dynamic, static or stored block is smallest.
 
 // Guardrails (and scripts/deflate-size.sh reports the code's size): the
 // workspace allows long functions for the decoder's unrolled loops, but the

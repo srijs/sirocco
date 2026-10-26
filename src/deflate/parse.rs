@@ -31,9 +31,9 @@ const _: () = assert!(FAST_SEQ_STORE_LENGTH * 4 >= MIN_BLOCK_LENGTH);
 pub(super) enum Strategy {
     /// Stored blocks only.
     Stored,
-    /// Greedy, with the hash table matchfinder, `depth` entries per bucket
-    /// (1 or 2).
-    Fastest,
+    /// With the hash table matchfinder, `depth` entries per bucket (1 or 2):
+    /// a match gives way to a longer one at the next position.
+    Fast,
     /// Greedy, with the hash chains.
     Greedy,
     /// Takes a match unless the next position has a better one.
@@ -48,12 +48,14 @@ pub(super) struct Params {
     pub(super) depth: u32,
     /// Stop searching at a match this long.
     pub(super) nice: u32,
-    /// Fastest and greedy: the positions inside a match longer than this,
-    /// but for its last, aren't searched later, as zlib's
+    /// The hash table and greedy: the positions inside a match longer than
+    /// this, but for its last, aren't searched later, as zlib's
     /// `max_insert_length`.
     pub(super) insert: u32,
-    /// Fastest: after `2^accel` literals in a row, search every other
-    /// position, then every third, and so on, as lz4 does. 0 for never.
+    /// The hash table and greedy: after `64 / accel` literals in a row,
+    /// search every other position, then every third, and so on, a step
+    /// longer every `64 / accel` literals, as lz4 does; 0 for never. Not in a stream's first window, where misses are as much
+    /// the empty tables' as the input's.
     pub(super) accel: u32,
 }
 
@@ -155,8 +157,8 @@ impl Parser {
         let mut mf = self.mf;
         let ended = match p.strategy {
             Strategy::Stored => self.stored(stop, end),
-            Strategy::Fastest if p.depth == 1 => self.fastest::<1>(&mut mf, t, p, buf, stop, end),
-            Strategy::Fastest => self.fastest::<2>(&mut mf, t, p, buf, stop, end),
+            Strategy::Fast if p.depth == 1 => self.fast::<1>(&mut mf, t, p, buf, stop, end),
+            Strategy::Fast => self.fast::<2>(&mut mf, t, p, buf, stop, end),
             Strategy::Greedy => self.greedy(&mut mf, t, p, buf, stop, end),
             Strategy::Lazy => self.lazy(&mut mf, t, p, buf, stop, end),
         };
@@ -171,7 +173,7 @@ impl Parser {
     }
 
     #[inline(always)]
-    fn fastest<const B: usize>(
+    fn fast<const B: usize>(
         &mut self,
         mf: &mut MatchFinder,
         t: &mut Tables<'_>,
@@ -186,6 +188,9 @@ impl Parser {
         let (lz, seqs) = (&mut t.lz, &mut *t.seqs);
         let mut pos = self.pos;
         let mut misses = 0u32;
+        // The open sequence in locals, which stores to the tables would
+        // otherwise make the compiler keep in memory.
+        let (mut n, mut lits) = block.open_seq();
         while pos < limit {
             // Computed without branching, so that the search's bounds
             // checks fold away.
@@ -193,21 +198,49 @@ impl Parser {
             if lim.max < SEARCH_NBYTES {
                 // Too near the end to search.
                 for &b in &buf[pos..limit] {
-                    block.literal::<false>(b);
+                    block.count_literal::<false>(b);
                 }
+                lits += (limit - pos) as u32;
                 pos = limit;
                 break;
             }
-            let (len, offset) = mf.ht_longest::<B>(lz, buf, pos, lim);
+            let (mut len, mut offset) = mf.ht_longest::<B>(lz, buf, pos, lim);
             if len > 0 {
                 // Only a match can fill the store.
-                if !block.has_room(FAST_SEQ_STORE_LENGTH) {
+                if n >= FAST_SEQ_STORE_LENGTH {
+                    block.set_open_seq((n, lits));
                     self.pos = pos;
                     return true;
                 }
-                block.matched::<false>(seqs, len, offset);
+                // While the match is short of nice, a longer one at the next
+                // position (with libdeflate's weighing of offsets) takes its
+                // place. `ahead` is whether the position after the match's
+                // start is searched, and so inserted. As in `lazy`, the next
+                // position may be past `limit`, in the lookahead.
+                let mut ahead = 0;
+                let mut nice = lim.nice;
+                while len < nice && pos + 1 < buf.len() {
+                    let lim = Limits::at(buf.len(), pos + 1, p.nice);
+                    if lim.max <= len {
+                        break;
+                    }
+                    let (next_len, next_offset) = mf.ht_longer::<B>(lz, buf, pos + 1, lim, len);
+                    if next_len > len
+                        && 4 * (next_len - len) as i32 + bsr(offset) - bsr(next_offset) > 2
+                    {
+                        block.count_literal::<false>(buf[pos]);
+                        lits += 1;
+                        pos += 1;
+                        (len, offset, nice) = (next_len, next_offset, lim.nice);
+                        continue;
+                    }
+                    ahead = 1;
+                    break;
+                }
+                block.store_match::<false>(seqs, n, lits, len, offset);
+                (n, lits) = (n + 1, 0);
                 if len <= p.insert {
-                    mf.ht_skip::<B>(lz, buf, pos + 1, len - 1);
+                    mf.ht_skip::<B>(lz, buf, pos + 1 + ahead, len - 1 - ahead as u32);
                 } else {
                     // Only the match's last position, so that runs still
                     // find a close match next.
@@ -218,23 +251,26 @@ impl Parser {
                 pos += len as usize;
                 misses = 0;
             } else {
-                block.literal::<false>(buf[pos]);
+                block.count_literal::<false>(buf[pos]);
+                lits += 1;
                 pos += 1;
-                if p.accel > 0 {
+                if p.accel > 0 && mf.warm {
                     misses += 1;
-                    let step = misses >> p.accel;
+                    let step = misses * p.accel / 64;
                     if step > 0 {
                         // Skip searching the next few positions.
                         let end = (pos + step as usize).min(limit);
                         for &b in &buf[pos..end] {
-                            block.literal::<false>(b);
+                            block.count_literal::<false>(b);
                         }
+                        lits += (end - pos) as u32;
                         pos = end;
                         mf.jump(lz, buf, pos);
                     }
                 }
             }
         }
+        block.set_open_seq((n, lits));
         self.pos = pos;
         pos >= max_end && end != Some(pos)
     }
@@ -255,10 +291,12 @@ impl Parser {
         let (lz, seqs) = (&mut t.lz, &mut *t.seqs);
         let min_len = self.min_len;
         let mut pos = self.pos;
+        let mut misses = 0u32;
         while pos < limit {
             let lim = Limits::at(buf.len(), pos, p.nice);
             let (len, offset) = mf.hc_longest(lz, buf, pos, min_len - 1, lim, p.depth);
             if len >= min_len && (len > MIN_MATCH || offset <= 4096) {
+                misses = 0;
                 block.matched::<true>(seqs, len, offset);
                 if len <= p.insert {
                     mf.hc_skip(lz, buf, pos + 1, len - 1);
@@ -271,6 +309,18 @@ impl Parser {
             } else {
                 block.literal::<true>(buf[pos]);
                 pos += 1;
+                if p.accel > 0 && mf.warm {
+                    misses += 1;
+                    let step = misses * p.accel / 64;
+                    if step > 0 {
+                        let end = (pos + step as usize).min(limit);
+                        for &b in &buf[pos..end] {
+                            block.literal::<true>(b);
+                        }
+                        pos = end;
+                        mf.jump(lz, buf, pos);
+                    }
+                }
             }
             if !block.has_room(SEQ_STORE_LENGTH) || block.should_end(pos, end.map(|e| e - pos)) {
                 self.pos = pos;

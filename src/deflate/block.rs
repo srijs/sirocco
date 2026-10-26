@@ -199,18 +199,53 @@ impl Block {
         self.n < limit
     }
 
+    /// The open sequence, for a parser to keep in registers: the number of
+    /// sequences before it and its literal run.
+    #[inline(always)]
+    pub(super) fn open_seq(&self) -> (usize, u32) {
+        (self.n, self.lits)
+    }
+
+    #[inline(always)]
+    pub(super) fn set_open_seq(&mut self, (n, lits): (usize, u32)) {
+        (self.n, self.lits) = (n, lits);
+    }
+
     #[inline(always)]
     pub(super) fn literal<const OBSERVE: bool>(&mut self, lit: u8) {
+        self.count_literal::<OBSERVE>(lit);
+        self.lits += 1;
+    }
+
+    /// Counts a literal, leaving the open sequence (as [`open_seq`]) to the
+    /// caller.
+    #[inline(always)]
+    pub(super) fn count_literal<const OBSERVE: bool>(&mut self, lit: u8) {
         self.litlen_freqs[lit as usize] += 1;
         if OBSERVE {
             self.split.new_observations[(((lit >> 5) & 6) | (lit & 1)) as usize] += 1;
             self.split.num_new_observations += 1;
         }
-        self.lits += 1;
     }
 
     #[inline(always)]
     pub(super) fn matched<const OBSERVE: bool>(&mut self, seqs: &mut Seqs, len: u32, offset: u32) {
+        self.store_match::<OBSERVE>(seqs, self.n, self.lits, len, offset);
+        self.n += 1;
+        self.lits = 0;
+    }
+
+    /// Counts a match and stores it as sequence `n`, after a literal run of
+    /// `lits`, leaving the open sequence to the caller.
+    #[inline(always)]
+    pub(super) fn store_match<const OBSERVE: bool>(
+        &mut self,
+        seqs: &mut Seqs,
+        n: usize,
+        lits: u32,
+        len: u32,
+        offset: u32,
+    ) {
         let slot = offset_slot(offset);
         self.litlen_freqs[FIRST_LEN_SYM + LENGTH_SLOT[len as usize] as usize] += 1;
         self.offset_freqs[slot as usize] += 1;
@@ -218,14 +253,12 @@ impl Block {
             self.split.new_observations[NUM_LITERAL_OBSERVATION_TYPES + usize::from(len >= 9)] += 1;
             self.split.num_new_observations += 1;
         }
-        seqs[self.n] = Seq {
-            litrun_len: self.lits | len << LEN_SHIFT,
+        seqs[n] = Seq {
+            litrun_len: lits | len << LEN_SHIFT,
             offset: offset as u16,
             slot: slot as u16,
         }
         .store();
-        self.n += 1;
-        self.lits = 0;
     }
 
     /// Whether the block should end at `pos`, from its statistics. `rest` is

@@ -177,18 +177,18 @@ pub struct Progress<'o> {
 
 /// The parameters for a level: the fastest found that compress at least as
 /// well as zlib's level does, on both the Silesia corpus and server logs
-/// (JSON and access logs). Levels 1 and 2 use the hash table, 3 and 4
-/// greedy parsing, and 5 to 9 lazy parsing, searching ever deeper.
+/// (JSON and access logs). Levels 1 to 3 search the hash table lazily, 4 the
+/// hash chains greedily, and 5 to 9 lazily, ever deeper.
 const fn params(level: Level) -> Params {
     use Strategy::*;
     // Unlimited inserts.
     const ALL: u32 = u32::MAX;
     let (strategy, depth, nice, insert, accel) = match level.0 {
         0 => (Stored, 0, 0, 0, 0),
-        1 => (Fastest, 1, 32, 8, 4),
-        2 => (Fastest, 2, 32, 8, 0),
-        3 => (Greedy, 4, 32, 16, 0),
-        4 => (Greedy, 6, 32, 32, 0),
+        1 => (Fast, 1, 32, 0, 12),
+        2 => (Fast, 1, 32, 16, 4),
+        3 => (Fast, 2, 32, 32, 4),
+        4 => (Greedy, 6, 32, 32, 2),
         5 => (Lazy, 6, 32, ALL, 0),
         6 => (Lazy, 16, 30, ALL, 0),
         7 => (Lazy, 24, 48, ALL, 0),
@@ -497,7 +497,7 @@ impl State {
     fn reset_matches(&mut self, t: &mut Tables<'_>, pos: usize, len: Option<usize>) {
         let s = self.params.strategy;
         if s != Strategy::Stored {
-            let ht = if s == Strategy::Fastest {
+            let ht = if s == Strategy::Fast {
                 self.params.depth as usize
             } else {
                 0

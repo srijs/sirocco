@@ -157,29 +157,29 @@ same level (negative is smaller), speeds are multiples of zlib's:
 
 | Level | sirocco MB/s | sirocco size | speed | zlib-rs size | speed | libdeflate size | speed |
 | --: | --: | --: | --: | --: | --: | --: | --: |
-| 1 | 447 | -0.5% | 2.5x | +21.9% | 1.8x | -4.8% | 2.0x |
-| 2 | 350 | -0.5% | 2.2x | +0.4% | 1.3x | -5.2% | 1.7x |
-| 3 | 270 | -1.7% | 2.2x | -1.6% | 1.5x | -3.8% | 2.0x |
-| 4 | 252 | -0.3% | 2.4x | -0.9% | 1.5x | -2.1% | 2.1x |
-| 5 | 219 | -0.0% | 3.0x | +0.1% | 2.0x | -1.4% | 2.4x |
-| 6 | 182 | +0.0% | 3.5x | +1.0% | 2.3x | -1.0% | 2.8x |
-| 7 | 163 | -0.1% | 3.8x | +0.6% | 1.9x | -1.2% | 2.4x |
-| 8 | 148 | -0.2% | 5.3x | +0.7% | 1.8x | -1.4% | 2.3x |
-| 9 | 133 | -0.3% | 6.4x | -0.1% | 2.6x | -1.4% | 2.5x |
+| 1 | 466 | -0.2% | 2.5x | +21.9% | 1.8x | -4.8% | 2.0x |
+| 2 | 406 | -0.3% | 2.5x | +0.4% | 1.3x | -5.2% | 1.6x |
+| 3 | 327 | -0.4% | 2.7x | -1.6% | 1.5x | -3.8% | 2.0x |
+| 4 | 260 | -0.3% | 2.3x | -0.9% | 1.4x | -2.1% | 2.0x |
+| 5 | 218 | -0.0% | 2.9x | +0.1% | 1.9x | -1.4% | 2.4x |
+| 6 | 181 | +0.0% | 3.5x | +1.0% | 2.3x | -1.0% | 2.7x |
+| 7 | 163 | -0.1% | 3.7x | +0.6% | 1.8x | -1.2% | 2.4x |
+| 8 | 147 | -0.2% | 5.2x | +0.7% | 1.8x | -1.4% | 2.3x |
+| 9 | 134 | -0.3% | 6.4x | -0.1% | 2.5x | -1.4% | 2.5x |
 
 On other inputs, sirocco's size and speed against zlib's at levels 1, 6 and 9:
 
 | Inputs | Level 1 | Level 6 | Level 9 |
 | --- | --: | --: | --: |
-| Canterbury, each file | -4.3%, 2.1x | -0.6%, 3.8x | -0.9%, 17.6x |
-| Server logs (`scripts/fetch-corpus.sh logs`), 39 MB | -2.0%, 2.0x | -1.9%, 2.5x | -0.8%, 5.3x |
-| Silesia in 4 KiB pieces, each compressed alone | +2.6%, 3.1x | -0.3%, 2.6x | -0.3%, 2.9x |
-| git.git objects (a 10% sample), each compressed alone | -0.5%, 2.3x | +0.4%, 2.8x | +0.0%, 3.4x |
+| Canterbury, each file | -6.1%, 2.0x | -0.6%, 3.8x | -0.9%, 17.6x |
+| Server logs (`scripts/fetch-corpus.sh logs`), 39 MB | -9.6%, 1.9x | -1.9%, 2.5x | -0.8%, 5.3x |
+| Silesia in 4 KiB pieces, each compressed alone | -0.3%, 2.8x | -0.3%, 2.6x | -0.3%, 2.9x |
+| git.git objects (a 10% sample), each compressed alone | -3.3%, 2.3x | +0.4%, 2.8x | +0.0%, 3.4x |
 
-Level 1 skips ahead through data where it finds no matches, which on small
-binary inputs (the 4 KiB Silesia pieces) costs a few percent against zlib;
-on real small inputs such as git objects it still compresses better. At
-levels 6 and 9, git objects come out up to 0.4% larger than zlib's.
+Levels 1 to 4 skip ahead through data where they find no matches, but not
+in a stream's first 32 KiB, where the tables are still filling, so small
+inputs lose nothing to it. At levels 6 and 9, git objects come out up to
+0.4% larger than zlib's.
 
 libdeflate's levels compress more than zlib's, so its rows are not like for
 like. At the same settings, sirocco's lazy parsing is a little faster than
@@ -226,9 +226,9 @@ Much of sirocco is its own work, though:
   flushes, with tables you can provide yourself.
 - **zlib's levels.** Each level is tuned to compress at least as well as
   zlib's same level in as little time as can be, with a few ideas from
-  elsewhere at the fast end: one-entry hash buckets, zlib's limit on
-  inserting the positions inside long matches, and lz4-style skipping
-  through incompressible data. Small inputs given whole get smaller hash
+  elsewhere at the fast end: lazy matching on a hash table of one-entry
+  buckets, zlib's limit on inserting the positions inside long matches, and
+  lz4-style skipping through incompressible data. Small inputs given whole get smaller hash
   tables, so that clearing them doesn't cost more than compressing.
 - **An idiomatic Rust API**, `no_std` support, and a differential test,
   fuzzing and benchmark suite against zlib, libdeflate, zlib-rs and

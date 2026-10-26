@@ -9,9 +9,9 @@
 //! - The hash chains (`hc`) keep, for each 4-byte hash, a chain of earlier
 //!   positions through `next`, searched to a depth, plus one position per
 //!   3-byte hash for close length-3 matches.
-//! - The hash table (`ht`) keeps the last two positions per 4-byte hash in
-//!   `hash4`, and finds matches of 4 bytes or more. It is for the fastest
-//!   level.
+//! - The hash table (`ht`) keeps the last one or two positions per 4-byte
+//!   hash in `hash4`, and finds matches of 4 bytes or more. It is for the
+//!   fastest levels.
 //!
 //! Small inputs given whole use fewer hash bits, so that clearing the tables
 //! doesn't cost more than compressing.
@@ -87,6 +87,9 @@ impl<'a> LzTables<'a> {
 pub(super) struct MatchFinder {
     /// The buffer position that stored positions are relative to.
     pub(super) base: usize,
+    /// Whether the base has moved since the reset: the tables have seen a
+    /// window of input.
+    pub(super) warm: bool,
     /// The ht matchfinder's bucket size, 1 or 2, or 0 for hc.
     ht: usize,
     /// The hashes' shifts: 32 less their bits.
@@ -136,11 +139,11 @@ pub(super) fn extend(a: &[u8], b: &[u8], start: usize) -> u32 {
     len as u32
 }
 
-/// Moves a position back a window, saturating at [`EMPTY`]. Branchless, as
-/// libdeflate: `EMPTY` if negative, else `x - 32768`.
+/// Moves a position back a window, saturating at [`EMPTY`], as libdeflate
+/// does (and in one instruction per vector).
 #[inline(always)]
 fn rebase_one(x: u16) -> u16 {
-    EMPTY_BITS | (x & !((x as i16 >> 15) as u16))
+    (x as i16).saturating_add(i16::MIN) as u16
 }
 
 /// Moves every position in `t` back a window. One copy, out of line: it is
@@ -178,11 +181,12 @@ struct Search<'a> {
 impl<'a> Search<'a> {
     #[inline(always)]
     fn new(buf: &'a [u8], cur: usize, max: usize, base: usize) -> Self {
-        // Clamped (it never is) to what's left, which shows the compiler
-        // that the window fits in `buf`.
-        let max = max.min(buf.split_at(cur).1.len());
+        // Clamped (it never is) to `buf`, which shows the compiler that the
+        // window fits in it.
+        let win = &buf[..(cur + max).min(buf.len())];
+        let max = win[cur..].len();
         Search {
-            win: &buf[..cur + max],
+            win,
             cur,
             max,
             base,
@@ -212,6 +216,7 @@ impl MatchFinder {
     pub(super) const fn new() -> Self {
         MatchFinder {
             base: 0,
+            warm: false,
             ht: 0,
             shift4: 32 - HASH4_ORDER,
             shift3: 32 - HASH3_ORDER,
@@ -247,6 +252,7 @@ impl MatchFinder {
         self.shift4 = 32 - bits;
         self.shift3 = 32 - bits.min(HASH3_ORDER);
         self.base = pos;
+        self.warm = false;
         self.next_hashes = [0; 2];
         self.next_heads = [EMPTY_BITS; 2];
         self.heads(tables).fill(EMPTY_BITS);
@@ -297,6 +303,7 @@ impl MatchFinder {
             self.next_heads = self.next_heads.map(rebase_one);
         }
         self.base += windows * WINDOW;
+        self.warm = true;
         cur - self.base
     }
 
@@ -496,8 +503,7 @@ impl MatchFinder {
 
     /// ht: finds the longest match of 4 or more at `cur`, up to `max_len`
     /// (at least [`SEARCH_NBYTES`]), and inserts `cur`. Returns the length
-    /// and offset of the match; with no match, `(0, 0)` if there was no
-    /// candidate to try and `(0, 1)` if none matched.
+    /// and offset of the match, or `(0, 0)` for none.
     #[inline(always)]
     pub(super) fn ht_longest<const B: usize>(
         &mut self,
@@ -562,9 +568,83 @@ impl MatchFinder {
                 }
             }
         }
-        if best_len == 0 {
-            // Candidates, but none matched.
-            return (0, 1);
+        (best_len, (cur - best) as u32)
+    }
+
+    /// ht: as [`ht_longest`](Self::ht_longest), but only finds a match
+    /// longer than `min`, which is 0 or from 4 to less than `max_len`.
+    #[inline(always)]
+    pub(super) fn ht_longer<const B: usize>(
+        &mut self,
+        tables: &mut LzTables<'_>,
+        buf: &[u8],
+        cur: usize,
+        limits: Limits,
+        min: u32,
+    ) -> (u32, u32) {
+        let Limits {
+            max: max_len,
+            nice: nice_len,
+        } = limits;
+        let rel = self.relative(tables, cur);
+        let cutoff = rel as i32 - WINDOW as i32;
+        let search = Search::new(buf, cur, max_len as usize, self.base);
+        let here = search.here();
+        let mask = MASK4 & !(B - 1);
+        let b = self.next_hashes[0] & mask;
+        let nb = (hash(load32(here, 1), self.shift4) * B) & mask;
+        self.next_hashes[0] = nb;
+        let seq = load32(here, 0);
+        // The bucket as loaded early, so that the search doesn't wait for it.
+        let [first, second] = self.next_heads;
+        if B == 1 {
+            tables.hash4[b] = rel as u16;
+        } else {
+            let bucket: &mut [u16; 2] = (&mut tables.hash4[b..b + 2]).try_into().unwrap();
+            *bucket = [rel as u16, first];
+        }
+        let (first, second) = (first as i16, if B == 1 { EMPTY } else { second as i16 });
+        self.next_heads = ht_bucket::<B>(tables, nb);
+
+        let in_window = |node: i16| i32::from(node) > cutoff;
+        // Whether candidate `c` can be longer than `len`: it matches the
+        // first 4 bytes, and the 4 ending one past `len`.
+        let may_beat = |c: &[u8], len: u32| {
+            load32(c, 0) == seq && {
+                let tail = len.max(4) as usize - 3;
+                len < 4 || load32(c, tail) == load32(here, tail)
+            }
+        };
+        let (mut best_len, mut best) = (min, cur);
+        if !in_window(first) {
+            return (0, 0);
+        }
+        let Some((c, m)) = search.candidate(first) else {
+            return (0, 0);
+        };
+        if may_beat(c, best_len) {
+            let len = extend(here, c, 4);
+            if len > best_len {
+                best_len = len;
+                best = m;
+                if best_len >= nice_len {
+                    return (best_len, (cur - best) as u32);
+                }
+            }
+        }
+        if in_window(second) {
+            if let Some((c, m)) = search.candidate(second) {
+                if may_beat(c, best_len) {
+                    let len = extend(here, c, 4);
+                    if len > best_len {
+                        best_len = len;
+                        best = m;
+                    }
+                }
+            }
+        }
+        if best == cur {
+            return (0, 0);
         }
         (best_len, (cur - best) as u32)
     }
