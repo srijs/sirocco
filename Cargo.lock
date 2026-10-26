@@ -725,7 +725,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sirocco"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "adler32furious",
  "crc32fast",

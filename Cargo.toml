@@ -1,6 +1,6 @@
 [package]
 name = "sirocco"
-version = "0.2.1"
+version = "0.3.0"
 description = "Fast DEFLATE, zlib and gzip compression and decompression in pure Rust"
 edition.workspace = true
 rust-version.workspace = true
