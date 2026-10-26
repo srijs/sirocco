@@ -21,6 +21,10 @@ mod wrapper;
 pub use reader::Reader;
 pub use stream::{Decoder, Lengths, Progress, Scanner};
 
+/// The smallest fixed buffer that [`Decoder::make_room`] can always free
+/// some of: more than the 32 KiB of history it keeps.
+pub const MIN_BUFFER_LEN: usize = stream::WINDOW + 1;
+
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 use core::fmt;
