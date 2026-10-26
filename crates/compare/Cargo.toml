@@ -14,11 +14,17 @@ workspace = true
 adler2 = "2.0.1"
 adler32furious.workspace = true
 crc32fast = { workspace = true, features = ["std"] }
+# zlib itself (madler's, bundled and built statically), the reference for
+# compressed sizes and for which streams are valid.
+flate2 = { version = "1.1", default-features = false, features = ["zlib"] }
+libz-sys = { version = "1.1", default-features = false, features = ["static"] }
 sirocco = { path = "../.." }
 libdeflater = "1.26"
 miniz_oxide = "0.9"
 zenflate = { version = "0.4", optional = true }
 zlib-rs = "0.6"
+# zlib-ng, built from source; needs cmake. Opt in to benchmark against it.
+libz-ng-sys = { version = "1.1", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
@@ -43,3 +49,4 @@ bench = false
 # zenflate is AGPL-3.0-only or commercial: opt in to benchmark against it.
 # It stays out of sirocco itself; this crate is never published.
 zenflate = ["dep:zenflate"]
+zlib-ng = ["dep:libz-ng-sys"]

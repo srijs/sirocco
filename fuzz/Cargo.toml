@@ -36,3 +36,17 @@ path = "fuzz_targets/stream.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "compress"
+path = "fuzz_targets/compress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compress_stream"
+path = "fuzz_targets/compress_stream.rs"
+test = false
+doc = false
+bench = false

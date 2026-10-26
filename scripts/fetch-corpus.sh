@@ -3,7 +3,7 @@
 #
 #   scripts/fetch-corpus.sh [--dir DIR] [SET...]
 #
-# SETs: silesia canterbury large enwik8 precompressed (default: all).
+# SETs: silesia canterbury large enwik8 precompressed logs (default: all).
 # Files land in DIR/<set>/ (default DIR: ./corpus, which is gitignored), which
 # is where `compare::corpus()` looks unless SIROCCO_CORPUS_DIR says otherwise.
 # Re-running skips sets that are already complete.
@@ -16,6 +16,9 @@
 #   precompressed  Already-compressed data (gzip, xz), built locally from
 #                  silesia. Incompressible input mostly takes the stored/
 #                  literal paths, which ratio and speed should not regress on.
+#   logs           A JSON log and an access log, 39 MB, generated locally
+#                  (scripts/gen-logs.py, with python3), which the
+#                  compressor's levels are calibrated on with silesia.
 set -euo pipefail
 
 dir=corpus
@@ -23,11 +26,11 @@ sets=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir) dir="$2"; shift 2 ;;
-    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) sets+=("$1"); shift ;;
   esac
 done
-[ ${#sets[@]} -gt 0 ] || sets=(silesia canterbury large enwik8 precompressed)
+[ ${#sets[@]} -gt 0 ] || sets=(silesia canterbury large enwik8 precompressed logs)
 
 mkdir -p "$dir"
 dir=$(cd "$dir" && pwd)
@@ -94,6 +97,9 @@ for set in "${sets[@]}"; do
       gzip -6 -c "$src/samba" > "$out/samba.gz"
       xz -6 -c "$src/xml" > "$out/xml.xz"
       finish precompressed dickens.gz samba.gz xml.xz ;;
+    logs)
+      python3 "$(dirname "$0")/gen-logs.py" "$dir/logs"
+      finish logs app.jsonl access.log ;;
     *) echo "error: unknown set '$set'" >&2; exit 2 ;;
   esac
 done

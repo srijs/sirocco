@@ -1,9 +1,9 @@
-//! Fast DEFLATE, zlib and gzip decompression in pure Rust.
+//! Fast DEFLATE, zlib and gzip compression and decompression in pure Rust.
 //!
-//! sirocco decodes with the same fast core whether it gets the whole input
-//! at once or piece by piece.
+//! sirocco compresses and decompresses with the same fast core whether it
+//! gets the whole input at once or piece by piece, without allocating.
 //!
-//! For a one-off call, use [`decompress`]:
+//! For a one-off call, use [`compress`] and [`decompress`]:
 //!
 //! ```
 //! use sirocco::Format;
@@ -15,7 +15,15 @@
 //! # Ok::<(), sirocco::inflate::Error>(())
 //! ```
 //!
-//! Everything else is in [`inflate`]:
+//! Compressing is in [`deflate`]:
+//!
+//! - [`deflate::Encoder`] compresses from a buffer you own, in one call or
+//!   many, with zlib's flushes. Its levels are zlib's, each compressing about
+//!   as well as zlib's same level, several times faster.
+//! - [`deflate::Writer`] compresses what is written to it into any
+//!   [`std::io::Write`].
+//!
+//! Decompressing is in [`inflate`]:
 //!
 //! - [`inflate::Decoder`] decompresses into your buffer, from input in one
 //!   piece or many, without allocating. Reuse it: its tables are costly to
@@ -39,10 +47,13 @@
 //!
 //! # Features
 //!
-//! - `std` (default): [`inflate::Reader`] and `std::io` integrations;
-//!   enables `alloc`.
-//! - `alloc`: [`decompress`]. Without it, [`inflate::Decoder`] and
-//!   [`inflate::Scanner`] still work.
+//! - `std` (default): [`deflate::Writer`], [`inflate::Reader`] and
+//!   `std::io` integrations; enables `alloc`.
+//! - `alloc`: [`compress`] and [`decompress`], and
+//!   [`deflate::Encoder::new`], which allocates the encoder's tables.
+//!   Without it, [`deflate::Encoder`] (with tables you give it, see
+//!   [`with_tables`](deflate::Encoder::with_tables)), [`inflate::Decoder`]
+//!   and [`inflate::Scanner`] still work.
 
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -55,6 +66,7 @@ extern crate alloc;
 extern crate std;
 
 mod checksum;
+pub mod deflate;
 mod format;
 pub mod inflate;
 
@@ -64,6 +76,25 @@ pub use format::Format;
 #[cfg(all(doctest, feature = "std"))]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
+
+/// Compresses all of `input` into a new `Vec`, at `level`.
+///
+/// It sets up the encoder each call, which for small inputs is a good part
+/// of the work; for many buffers, reuse a [`deflate::Encoder`].
+///
+/// ```
+/// use sirocco::{deflate::Level, Format};
+///
+/// let compressed = sirocco::compress(Format::Gzip, Level::DEFAULT, b"hello hello hello");
+/// let data = sirocco::decompress(Format::Gzip, &compressed, 1 << 20)?;
+/// assert_eq!(data, b"hello hello hello");
+/// # Ok::<(), sirocco::inflate::Error>(())
+/// ```
+#[cfg(feature = "alloc")]
+#[must_use]
+pub fn compress(format: Format, level: deflate::Level, input: &[u8]) -> alloc::vec::Vec<u8> {
+    deflate::compress(format, level, input)
+}
 
 /// Decompresses all of `input` into a new `Vec` of at most `max_len` bytes.
 ///

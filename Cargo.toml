@@ -1,15 +1,15 @@
 [package]
 name = "sirocco"
 version = "0.2.1"
-description = "Fast DEFLATE, zlib and gzip decompression in pure Rust"
+description = "Fast DEFLATE, zlib and gzip compression and decompression in pure Rust"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
-keywords = ["deflate", "zlib", "gzip", "inflate", "decompression"]
+keywords = ["deflate", "zlib", "gzip", "compression", "decompression"]
 categories = ["compression", "no-std"]
-include = ["/src", "/LICENSE-MIT", "/LICENSE-APACHE", "/README.md"]
+include = ["/src", "/examples", "/LICENSE-MIT", "/LICENSE-APACHE", "/README.md"]
 
 [package.metadata.docs.rs]
 all-features = true

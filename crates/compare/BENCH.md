@@ -5,7 +5,7 @@ different branches and machines can be compared. It lives in
 `crates/compare/src/suite`; `scripts/bench.sh` builds and runs it.
 
 ```sh
-scripts/fetch-corpus.sh silesia canterbury        # once: real data in corpus/
+scripts/fetch-corpus.sh silesia canterbury logs   # once: real data in corpus/
 scripts/bench.sh --base origin/main               # the full A/B: ~40 min on a 4-core cloud VM
 scripts/bench.sh --base origin/main --quick       # a smoke run while iterating: ~5 min
 ```
@@ -134,3 +134,32 @@ The suite also runs without the script, for one build and no base:
 The base must have `StreamMeasurer` (sirocco after PR #29). To add a case,
 extend `suite/cases.rs`; to add a decompressor, implement
 `suite::Inflater` and add it in `suite::main`.
+
+## Compression
+
+Compression has its own, simpler benchmark: size and speed level by level
+against zlib (madler's, built from source by `libz-sys`), zlib-rs,
+libdeflate and miniz_oxide, all as raw DEFLATE.
+
+```sh
+cargo run -p compare --release --bin compress                    # each corpus set, and the synthetic corpus
+cargo run -p compare --release --bin compress -- --chunk 4096    # small inputs: the files cut into 4 KiB pieces
+cargo run -p compare --release --bin compress -- --levels 1,6,9 --impls sirocco,zlib path/to/files
+```
+
+Each group of files is compressed once untimed (which gives the sizes, and
+with `--check` decompresses every output with zlib), then timed in
+interleaved rounds, rotating which compressor goes first; a compressor's time
+is its best round. `size vs zlib` compares total compressed size (negative
+means smaller), `speed vs zlib` total time.
+
+sirocco's levels are calibrated against zlib's: each should compress at least
+as well as zlib's same level, on Silesia and on server logs, in as little
+time as can be. After changing the compressor, check that it still does:
+
+```sh
+cargo run -p compare --release --bin compress -- --rounds 1 --impls sirocco,zlib \
+  --max-size-vs-zlib 1 corpus/silesia corpus/canterbury corpus/logs
+```
+
+which fails if any level of any group is more than 1% larger than zlib's.

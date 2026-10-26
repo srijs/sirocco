@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod deflate;
 pub mod suite;
 
 /// A named benchmark / test input.
