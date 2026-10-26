@@ -28,7 +28,7 @@ const BUF_LENS: [usize; 3] = [64 << 10, (64 << 10) + 4099, 1 << 17];
 
 #[test]
 fn corpus_streams_at_every_level() {
-    for s in compare::corpus() {
+    for s in compare::test_corpus() {
         for level in 0..=12 {
             for format in Format::ALL {
                 let mut c = reference_compress(format, level, &s.data);

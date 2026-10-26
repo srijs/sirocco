@@ -79,6 +79,19 @@ pub fn synthetic_corpus() -> Vec<Sample> {
     out
 }
 
+/// The inputs for tests: the synthetic corpus, without its 4 MiB samples in
+/// debug builds. Tests stay fast and the same everywhere; the real corpus is
+/// for the benchmarks (which check every output before timing it), and
+/// arbitrary data for the fuzzers.
+#[must_use]
+pub fn test_corpus() -> Vec<Sample> {
+    let big = !cfg!(debug_assertions);
+    synthetic_corpus()
+        .into_iter()
+        .filter(|s| big || s.data.len() <= 256 << 10)
+        .collect()
+}
+
 /// Synthetic corpus plus every file under the real-corpus directory, if any.
 ///
 /// The directory is `SIROCCO_CORPUS_DIR` if set, else `corpus/` at the

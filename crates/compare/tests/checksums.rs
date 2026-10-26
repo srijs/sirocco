@@ -24,7 +24,7 @@ fn reference_crc32(data: &[u8]) -> u32 {
 
 #[test]
 fn corpus_matches_libdeflate() {
-    for s in compare::corpus() {
+    for s in compare::test_corpus() {
         let want = reference_adler32(&s.data);
         for (name, got) in adler32_all(&s.data) {
             assert_eq!(got, want, "adler32 ({name}) {}", s.name);

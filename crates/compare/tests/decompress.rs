@@ -21,7 +21,7 @@ fn check_same(format: Format, input: &[u8], out_len: usize) -> Outcome {
 #[test]
 fn corpus_round_trips_at_every_level() {
     let mut d = SiroccoDecoders::new();
-    for s in compare::corpus() {
+    for s in compare::test_corpus() {
         for level in 0..=12 {
             for format in Format::ALL {
                 let c = reference_compress(format, level, &s.data);
