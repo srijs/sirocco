@@ -547,7 +547,7 @@ impl MatchFinder {
         if load32(c, 0) == seq {
             best_len = extend(here, c, 4);
             best = m;
-            if !in_window(second) || best_len >= nice_len {
+            if B == 1 || !in_window(second) || best_len >= nice_len {
                 return (best_len, (cur - best) as u32);
             }
             let tail = best_len as usize - 3;
@@ -560,7 +560,7 @@ impl MatchFinder {
                     }
                 }
             }
-        } else if in_window(second) {
+        } else if B == 2 && in_window(second) {
             if let Some((c, m)) = search.candidate(second) {
                 if load32(c, 0) == seq {
                     best_len = extend(here, c, 4);
@@ -632,7 +632,7 @@ impl MatchFinder {
                 }
             }
         }
-        if in_window(second) {
+        if B == 2 && in_window(second) {
             if let Some((c, m)) = search.candidate(second) {
                 if may_beat(c, best_len) {
                     let len = extend(here, c, 4);

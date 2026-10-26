@@ -157,24 +157,24 @@ same level (negative is smaller), speeds are multiples of zlib's:
 
 | Level | sirocco MB/s | sirocco size | speed | zlib-rs size | speed | libdeflate size | speed |
 | --: | --: | --: | --: | --: | --: | --: | --: |
-| 1 | 466 | -0.2% | 2.5x | +21.9% | 1.8x | -4.8% | 2.0x |
-| 2 | 406 | -0.3% | 2.5x | +0.4% | 1.3x | -5.2% | 1.6x |
-| 3 | 327 | -0.4% | 2.7x | -1.6% | 1.5x | -3.8% | 2.0x |
-| 4 | 260 | -0.3% | 2.3x | -0.9% | 1.4x | -2.1% | 2.0x |
+| 1 | 477 | -0.2% | 2.6x | +21.9% | 1.8x | -4.8% | 2.0x |
+| 2 | 411 | -0.3% | 2.5x | +0.4% | 1.3x | -5.2% | 1.6x |
+| 3 | 323 | -0.4% | 2.7x | -1.6% | 1.5x | -3.8% | 2.0x |
+| 4 | 261 | -0.3% | 2.3x | -0.9% | 1.4x | -2.1% | 2.0x |
 | 5 | 218 | -0.0% | 2.9x | +0.1% | 1.9x | -1.4% | 2.4x |
-| 6 | 181 | +0.0% | 3.5x | +1.0% | 2.3x | -1.0% | 2.7x |
-| 7 | 163 | -0.1% | 3.7x | +0.6% | 1.8x | -1.2% | 2.4x |
-| 8 | 147 | -0.2% | 5.2x | +0.7% | 1.8x | -1.4% | 2.3x |
+| 6 | 182 | +0.0% | 3.5x | +1.0% | 2.3x | -1.0% | 2.7x |
+| 7 | 162 | -0.1% | 3.7x | +0.6% | 1.8x | -1.2% | 2.4x |
+| 8 | 148 | -0.2% | 5.2x | +0.7% | 1.8x | -1.4% | 2.3x |
 | 9 | 134 | -0.3% | 6.4x | -0.1% | 2.5x | -1.4% | 2.5x |
 
 On other inputs, sirocco's size and speed against zlib's at levels 1, 6 and 9:
 
 | Inputs | Level 1 | Level 6 | Level 9 |
 | --- | --: | --: | --: |
-| Canterbury, each file | -6.1%, 2.0x | -0.6%, 3.8x | -0.9%, 17.6x |
-| Server logs (`scripts/fetch-corpus.sh logs`), 39 MB | -9.6%, 1.9x | -1.9%, 2.5x | -0.8%, 5.3x |
-| Silesia in 4 KiB pieces, each compressed alone | -0.3%, 2.8x | -0.3%, 2.6x | -0.3%, 2.9x |
-| git.git objects (a 10% sample), each compressed alone | -3.3%, 2.3x | +0.4%, 2.8x | +0.0%, 3.4x |
+| Canterbury, each file | -6.1%, 2.2x | -0.6%, 3.8x | -0.9%, 17.6x |
+| Server logs (`scripts/fetch-corpus.sh logs`), 39 MB | -9.6%, 2.0x | -1.9%, 2.5x | -0.8%, 5.3x |
+| Silesia in 4 KiB pieces, each compressed alone | -0.3%, 2.9x | -0.3%, 2.6x | -0.3%, 2.9x |
+| git.git objects (a 10% sample), each compressed alone | -3.3%, 2.4x | +0.4%, 2.8x | +0.0%, 3.4x |
 
 Levels 1 to 4 skip ahead through data where they find no matches, but not
 in a stream's first 32 KiB, where the tables are still filling, so small
