@@ -34,7 +34,7 @@ const OUT_LEN: usize = 64 * 1024;
 /// ```
 pub struct Writer<W: Write> {
     inner: W,
-    encoder: Encoder,
+    encoder: std::boxed::Box<Encoder>,
     /// The input, filled up to its length.
     buf: Vec<u8>,
     out: Vec<u8>,
@@ -54,7 +54,7 @@ impl<W: Write> Writer<W> {
     pub fn new(format: Format, level: Level, inner: W) -> Self {
         Writer {
             inner,
-            encoder: Encoder::new(format, level),
+            encoder: std::boxed::Box::new(Encoder::new(format, level)),
             buf: Vec::new(),
             out: Vec::new(),
         }
