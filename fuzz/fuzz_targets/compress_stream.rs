@@ -7,7 +7,7 @@
 use compare::deflate::{check_stream, sirocco_compress_stream, Step};
 use compare::Format;
 use libfuzzer_sys::fuzz_target;
-use sirocco::deflate::{Encoder, Flush};
+use sirocco::deflate::Flush;
 
 fuzz_target!(|data: &[u8]| {
     // The first 12 bytes pick the level, format, buffer and steps; the input

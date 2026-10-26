@@ -6,3 +6,5 @@ extend-exclude = ["Cargo.lock"]
 [default.extend-words]
 # CPUID vendor string fragments ("GenuineIntel" is split across registers).
 ine = "ine"
+# Literals, as in `litlen` and `litrun`.
+lits = "lits"

@@ -98,7 +98,8 @@ fn sort_symbols(freqs: &[u32], lens: &mut [u8], a: &mut [u32]) -> usize {
 /// symbol bits are kept as they were.
 fn build_tree(a: &mut [u32]) {
     let last = a.len() - 1;
-    // The next leaf, the next unparented non-leaf, and the next free slot.
+    // The next leaf, the next non-leaf without a parent, and the next free
+    // slot.
     let (mut i, mut b, mut e) = (0, 0, 0);
     loop {
         let new_freq;
