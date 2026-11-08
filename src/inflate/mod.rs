@@ -46,7 +46,8 @@ pub enum Error {
     BadData,
     /// The zlib or gzip trailer doesn't match the output.
     ChecksumMismatch,
-    /// The output would exceed [`crate::decompress`]'s limit.
+    /// The output would exceed [`crate::decompress`]'s limit, or
+    /// [`Decoder::decompress_whole`]'s buffer.
     InsufficientSpace,
     /// Bytes follow the stream (only from [`crate::decompress`]).
     TrailingData,
