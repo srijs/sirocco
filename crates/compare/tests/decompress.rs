@@ -60,6 +60,41 @@ fn truncated_streams_match_zlib() {
     }
 }
 
+/// A literal-heavy stream long enough that its tables get literal pairs, with
+/// the output a few bytes short and the input cut short, and both: somewhere
+/// in there a pair meets exactly one byte of room, in a whole stream and in a
+/// truncated one, and the outcome (and its error) must still be zlib's.
+#[test]
+fn pairs_at_the_ends_match_zlib() {
+    // 64 KiB over a skewed alphabet, as quality strings: short literal codes,
+    // and about 3:1, so that pairs are built.
+    let mut x = 0x9E37_79B9u32;
+    let data: Vec<u8> = (0..65_536)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            match x % 16 {
+                0..=7 => b'F',
+                8..=11 => b':',
+                12..=13 => b',',
+                14 => b'#',
+                _ => (x >> 8) as u8,
+            }
+        })
+        .collect();
+    for level in [1, 6, 9] {
+        for format in Format::ALL {
+            let c = reference_compress(format, level, &data);
+            for short in 0..=40 {
+                for cut in 0..=32 {
+                    check_same(format, &c[..c.len() - cut], data.len() - short);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn empty_input() {
     for format in Format::ALL {
