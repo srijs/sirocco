@@ -501,6 +501,41 @@ impl MatchFinder {
         self.next_heads = [tables.hash3[h3], tables.hash4[h4]];
     }
 
+    /// hc: inserts the `count` positions from `from` that a match at
+    /// `offset` covers after its first, as [`hc_skip`](Self::hc_skip) does,
+    /// but for those no later search of `depth` candidates can reach, which
+    /// change nothing.
+    ///
+    /// Inside the match, the 4 bytes at each position (but the last 3, which
+    /// run past it) are those `offset` before. So once the last `depth *
+    /// offset` such positions are in, each earlier one has `depth` newer
+    /// entries with the same bytes ahead of it in its chain, and no search
+    /// walks that far; nor is it the newest in its 3-byte bucket.
+    #[inline(always)]
+    pub(super) fn hc_skip_match(
+        &mut self,
+        tables: &mut LzTables<'_>,
+        buf: &[u8],
+        from: usize,
+        count: u32,
+        offset: u32,
+        depth: u32,
+    ) {
+        let end = from + count as usize;
+        let keep = depth as usize * offset as usize + 3;
+        // Only when that leaves out enough to pay for the jump; near the end,
+        // hc_skip inserts nothing, and the jump mustn't move. (Out of line,
+        // as a cold call, it costs the parser 4-7%: the match finder's state
+        // no longer stays in registers.)
+        if keep + 32 <= count as usize && end + SEARCH_NBYTES as usize <= buf.len() {
+            let start = end - keep;
+            self.jump(tables, buf, start);
+            self.hc_skip(tables, buf, start, keep as u32);
+        } else {
+            self.hc_skip(tables, buf, from, count);
+        }
+    }
+
     /// ht: finds the longest match of 4 or more at `cur`, up to `max_len`
     /// (at least [`SEARCH_NBYTES`]), and inserts `cur`. Returns the length
     /// and offset of the match, or `(0, 0)` for none.
@@ -694,6 +729,8 @@ fn ht_bucket<const B: usize>(tables: &LzTables<'_>, b: usize) -> [u16; 2] {
 mod tests {
     use alloc::{vec, vec::Vec};
 
+    use proptest::{collection::vec, prelude::*};
+
     use super::*;
 
     #[test]
@@ -717,6 +754,96 @@ mod tests {
             t.map(|x| x as i16),
             [EMPTY, EMPTY, EMPTY, -32767, -1, EMPTY]
         );
+    }
+
+    /// Data with a repeating match in it, for [`hc_skip_match`]: arbitrary
+    /// bytes, then a run repeating every `period` bytes whose last `len`, from
+    /// `start`, are a match `period` back, then a byte that breaks the run,
+    /// then pieces of the run's pattern (from some phase) among arbitrary
+    /// bytes, for later searches to look for.
+    #[derive(Debug)]
+    struct Repeating {
+        data: Vec<u8>,
+        start: usize,
+        len: usize,
+        period: usize,
+        depth: u32,
+    }
+
+    /// A [`Repeating`] with a match of 31 to 258 bytes and a search depth of 1
+    /// to 48: mostly with periods short enough that some inserts are left
+    /// out, sometimes any up to 300, for which none are.
+    fn repeating() -> impl Strategy<Value = Repeating> {
+        (1u32..=48)
+            .prop_flat_map(|depth| {
+                let short = 1..=(200 / depth as usize).max(1);
+                (
+                    prop_oneof![4 => short, 1 => 1usize..=300],
+                    31usize..=258,
+                    Just(depth),
+                )
+            })
+            .prop_flat_map(|(period, len, depth)| {
+                (
+                    vec(any::<u8>(), period),
+                    vec(any::<u8>(), 0..2000),
+                    vec((16usize..=256, 0..period, vec(any::<u8>(), 0..8)), 40),
+                    Just(len),
+                    Just(depth),
+                )
+            })
+            .prop_map(|(pattern, before, after, len, depth)| {
+                let period = pattern.len();
+                let mut data = before;
+                let start = data.len() + period;
+                data.extend((0..period + len).map(|i| pattern[i % period]));
+                data.push(pattern[len % period].wrapping_add(1));
+                for (n, phase, noise) in after {
+                    data.extend((0..n).map(|i| pattern[(phase + i) % period]));
+                    data.extend(noise);
+                }
+                Repeating {
+                    data,
+                    start,
+                    len,
+                    period,
+                    depth,
+                }
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(
+            option_env!("SIROCCO_PROPTEST_CASES").and_then(|s| s.parse().ok()).unwrap_or(48)
+        ))]
+
+        /// Leaving out the inserts of a repeating match that no search can
+        /// reach changes no later search, at a search's depth or the lazy
+        /// parser's half of it.
+        #[test]
+        fn skip_match_leaves_out_only_unreachable_inserts(r in repeating()) {
+            let Repeating { data, start, len, depth, period } = r;
+            let mut mem = [vec![0; LZ_TABLES_LEN], vec![0; LZ_TABLES_LEN]];
+            let [m0, m1] = &mut mem;
+            let (mut ta, _) = LzTables::carve(m0);
+            let (mut tb, _) = LzTables::carve(m1);
+            let (mut a, mut b) = (MatchFinder::new(), MatchFinder::new());
+            a.reset(&mut ta, 0, 0, None);
+            b.reset(&mut tb, 0, 0, None);
+            a.hc_skip(&mut ta, &data, 0, start as u32 + 1);
+            b.hc_skip(&mut tb, &data, 0, start as u32 + 1);
+            a.hc_skip(&mut ta, &data, start + 1, len as u32 - 1);
+            b.hc_skip_match(&mut tb, &data, start + 1, len as u32 - 1, period as u32, depth);
+            let lim = Limits { max: 258, nice: 258 };
+            for cur in start + len..data.len() - 300 {
+                let d = if cur.is_multiple_of(2) { depth } else { (depth >> 1).max(1) };
+                prop_assert_eq!(
+                    a.hc_longest(&mut ta, &data, cur, 2, lim, d),
+                    b.hc_longest(&mut tb, &data, cur, 2, lim, d),
+                    "position {}", cur
+                );
+            }
+        }
     }
 
     /// Every match the finders report is real and within the window, across

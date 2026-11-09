@@ -366,7 +366,7 @@ impl Parser {
                     // A match at `pos - 1`: take it if it's long enough...
                     if cur_len >= lim.nice {
                         block.matched::<true>(seqs, cur_len, cur_offset);
-                        mf.hc_skip(lz, buf, pos, cur_len - 1);
+                        mf.hc_skip_match(lz, buf, pos, cur_len - 1, cur_offset, p.depth);
                         pos += cur_len as usize - 1;
                         break;
                     }
@@ -385,7 +385,8 @@ impl Parser {
                         continue;
                     }
                     block.matched::<true>(seqs, cur_len, cur_offset);
-                    mf.hc_skip(lz, buf, pos, cur_len - 2);
+                    // The search at the next position went half as deep.
+                    mf.hc_skip_match(lz, buf, pos, cur_len - 2, cur_offset, p.depth);
                     pos += cur_len as usize - 2;
                     break;
                 }
