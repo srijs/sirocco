@@ -654,13 +654,33 @@ fn copy_match(output: &mut [u8], dst: usize, offset: usize, length: usize) {
             }
         }
     } else {
+        // A pattern of 2 to 7 bytes. Word by word, each load would wait for the
+        // store before it. So copy that way only until the first 16 bytes at
+        // the destination hold the pattern, then store those 16 on and on, as
+        // many whole periods further each time as fit in them (from `i`, a
+        // whole number of periods, up to which the destination is right).
+        // Short matches end here, after the rounds they always took.
         loop {
             copy_word!(0);
             copy_word!(offset);
             i += 2 * offset;
             if i >= length {
+                return;
+            }
+            if i >= 16 {
                 break;
             }
+        }
+        let pattern = *w[offset..].first_chunk::<16>().unwrap();
+        // `16 / offset * offset`, without a division.
+        const STEP: [u8; 8] = [16, 16, 16, 15, 16, 15, 12, 14];
+        let step = usize::from(STEP[offset & 7]);
+        // One array for all the stores, so that they need no bounds checks:
+        // `i < length <= MAX_MATCH_LEN`.
+        let out: &mut [u8; MAX_MATCH_LEN + 16] = w[offset..].first_chunk_mut().unwrap();
+        while i < length {
+            *out[i..].first_chunk_mut().unwrap() = pattern;
+            i += step;
         }
     }
 }
@@ -1248,21 +1268,43 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
 
-    #[test]
-    fn copy_match_slow_matches_byte_copy() {
+    /// Checks `copy` against a byte-by-byte copy, at every offset where the
+    /// copies work differently (a byte, a pattern of 2 to 7, words that
+    /// overlap their source or not) and every length, with `room` bytes of
+    /// buffer after the match. With `overruns`, `copy` may write into them.
+    fn check_against_byte_copy(
+        copy: fn(&mut [u8], usize, usize, usize),
+        room: usize,
+        overruns: bool,
+    ) {
         let start: Vec<u8> = (0..300u32).map(|i| (i * 7 + 3) as u8).collect();
         for offset in 1..=70 {
             for length in 3..=MAX_MATCH_LEN {
                 let dst = 100;
                 let mut want = start.clone();
-                want.resize(dst + length + 8, 0);
+                want.resize(dst + length + room, 0);
                 let mut got = want.clone();
                 for i in dst..dst + length {
                     want[i] = want[i - offset];
                 }
-                copy_match_slow(&mut got, dst, offset, length);
-                assert_eq!(got, want, "offset {offset}, length {length}");
+                copy(&mut got, dst, offset, length);
+                let checked = if overruns { dst + length } else { want.len() };
+                assert_eq!(
+                    got[..checked],
+                    want[..checked],
+                    "offset {offset}, length {length}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn copy_match_matches_byte_copy() {
+        check_against_byte_copy(copy_match, MATCH_SPAN, true);
+    }
+
+    #[test]
+    fn copy_match_slow_matches_byte_copy() {
+        check_against_byte_copy(copy_match_slow, 8, false);
     }
 }
