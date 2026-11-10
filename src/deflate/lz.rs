@@ -7,8 +7,9 @@
 //! the window becomes [`EMPTY`], which is never in range again.
 //!
 //! - The hash chains (`hc`) keep, for each 4-byte hash, a chain of earlier
-//!   positions through `next`, searched to a depth, plus one position per
-//!   3-byte hash for close length-3 matches.
+//!   positions through `next`, searched to a depth, and find matches of 4
+//!   bytes or more. (libdeflate's also keep one position per 3-byte hash,
+//!   for close length-3 matches; those cost more than they save, here.)
 //! - The hash table (`ht`) keeps the last one or two positions per 4-byte
 //!   hash in `hash4`, and finds matches of 4 bytes or more. It is for the
 //!   fastest levels.
@@ -23,7 +24,6 @@ const EMPTY: i16 = i16::MIN;
 const EMPTY_BITS: u16 = EMPTY as u16;
 
 const HASH4_ORDER: u32 = 16;
-const HASH3_ORDER: u32 = 15;
 /// The ht matchfinder's buckets live in `hash4`, two entries each.
 const HT_ORDER: u32 = HASH4_ORDER - 1;
 /// The fewest hash bits used, however small the input.
@@ -62,23 +62,20 @@ pub(super) struct LzTables<'a> {
     /// hc: the first position of each length-4 hash chain. ht: the
     /// buckets, one or two positions each.
     pub(super) hash4: &'a mut [u16; 1 << HASH4_ORDER],
-    /// hc: the last position of each length-3 hash.
-    pub(super) hash3: &'a mut [u16; 1 << HASH3_ORDER],
     /// hc: the next older position in the chain of the position `i` (mod
     /// the window).
     pub(super) next: &'a mut [u16; WINDOW],
 }
 
 /// The `u16`s of tables [`LzTables`] takes.
-pub(super) const LZ_TABLES_LEN: usize = (1 << HASH4_ORDER) + (1 << HASH3_ORDER) + WINDOW;
+pub(super) const LZ_TABLES_LEN: usize = (1 << HASH4_ORDER) + WINDOW;
 
 impl<'a> LzTables<'a> {
     /// Takes the tables from the front of `mem`, returning the rest.
     pub(super) fn carve(mem: &'a mut [u16]) -> (Self, &'a mut [u16]) {
         let (hash4, mem) = mem.split_first_chunk_mut().unwrap();
-        let (hash3, mem) = mem.split_first_chunk_mut().unwrap();
         let (next, mem) = mem.split_first_chunk_mut().unwrap();
-        (LzTables { hash4, hash3, next }, mem)
+        (LzTables { hash4, next }, mem)
     }
 }
 
@@ -92,20 +89,18 @@ pub(super) struct MatchFinder {
     pub(super) warm: bool,
     /// The ht matchfinder's bucket size, 1 or 2, or 0 for hc.
     ht: usize,
-    /// The hashes' shifts: 32 less their bits.
+    /// The hash's shift: 32 less its bits.
     shift4: u32,
-    shift3: u32,
-    /// The hashes of the next position, precomputed as libdeflate does: hc's
-    /// length-3 and length-4 hashes, or ht's bucket.
+    /// The hash of the next position, precomputed as libdeflate does: hc's
+    /// chain or ht's bucket (the second is unused).
     next_hashes: [usize; 2],
-    /// The table entries at `next_hashes`, loaded early: hc's two heads, or
-    /// ht's bucket. That stands in for libdeflate's prefetches: the next
+    /// The table entries at `next_hashes`, loaded early: hc's chain head
+    /// (and nothing), or ht's bucket. That stands in for libdeflate's prefetches: the next
     /// search finds them in cache, and ht's uses the bucket as loaded.
     next_heads: [u16; 2],
 }
 
 const MASK4: usize = (1 << HASH4_ORDER) - 1;
-const MASK3: usize = (1 << HASH3_ORDER) - 1;
 
 /// The hash of `seq`: the high bits of a multiplicative hash, `32 - shift`
 /// of them.
@@ -159,10 +154,9 @@ fn rebase(t: &mut [u16]) {
 /// leave none).
 #[cold]
 #[inline(never)]
-fn slide(heads: &mut [u16], hash3: &mut [u16], next: &mut [u16], windows: usize) {
+fn slide(heads: &mut [u16], next: &mut [u16], windows: usize) {
     for _ in 0..windows.min(2) {
         rebase(heads);
-        rebase(hash3);
         rebase(next);
     }
 }
@@ -219,7 +213,6 @@ impl MatchFinder {
             warm: false,
             ht: 0,
             shift4: 32 - HASH4_ORDER,
-            shift3: 32 - HASH3_ORDER,
             next_hashes: [0; 2],
             next_heads: [EMPTY_BITS; 2],
         }
@@ -250,16 +243,11 @@ impl MatchFinder {
         };
         self.ht = ht;
         self.shift4 = 32 - bits;
-        self.shift3 = 32 - bits.min(HASH3_ORDER);
         self.base = pos;
         self.warm = false;
         self.next_hashes = [0; 2];
         self.next_heads = [EMPTY_BITS; 2];
         self.heads(tables).fill(EMPTY_BITS);
-        if ht == 0 {
-            let n3 = 1 << (32 - self.shift3);
-            tables.hash3[..n3].fill(EMPTY_BITS);
-        }
         // `next` needs no clearing: entries are only read through chains
         // from the heads, which write them first.
     }
@@ -283,22 +271,12 @@ impl MatchFinder {
         // through the loops that inline this.
         let windows = rel / WINDOW;
         let n4 = (1 << (32 - self.shift4)) * self.ht.max(1);
-        let n3 = if self.ht == 0 {
-            1 << (32 - self.shift3)
-        } else {
-            0
-        };
         let next = if self.ht == 0 {
             &mut tables.next[..]
         } else {
             &mut []
         };
-        slide(
-            &mut tables.hash4[..n4],
-            &mut tables.hash3[..n3],
-            next,
-            windows,
-        );
+        slide(&mut tables.hash4[..n4], next, windows);
         for _ in 0..windows.min(2) {
             self.next_heads = self.next_heads.map(rebase_one);
         }
@@ -343,10 +321,9 @@ impl MatchFinder {
                 ht_bucket::<2>(tables, b)
             };
         } else {
-            let h3 = hash(seq & 0xFF_FFFF, self.shift3) & MASK3;
             let h4 = hash(seq, self.shift4) & MASK4;
-            self.next_hashes = [h3, h4];
-            self.next_heads = [tables.hash3[h3], tables.hash4[h4]];
+            self.next_hashes = [h4, 0];
+            self.next_heads = [tables.hash4[h4], EMPTY_BITS];
         }
     }
 
@@ -377,16 +354,13 @@ impl MatchFinder {
         }
         let search = Search::new(buf, cur, max_len as usize, self.base);
         let here = search.here();
-        let [h3, h4] = self.next_hashes;
-        let [node3, mut node4] = self.next_heads.map(|n| n as i16);
-        tables.hash3[h3 & MASK3] = rel as u16;
+        let h4 = self.next_hashes[0];
+        let mut node4 = self.next_heads[0] as i16;
         tables.hash4[h4 & MASK4] = rel as u16;
         tables.next[rel & (WINDOW - 1)] = node4 as u16;
-        let next_seq = load32(here, 1);
-        let n3 = hash(next_seq & 0xFF_FFFF, self.shift3) & MASK3;
-        let n4 = hash(next_seq, self.shift4) & MASK4;
-        self.next_hashes = [n3, n4];
-        self.next_heads = [tables.hash3[n3], tables.hash4[n4]];
+        let n4 = hash(load32(here, 1), self.shift4) & MASK4;
+        self.next_hashes = [n4, 0];
+        self.next_heads = [tables.hash4[n4], EMPTY_BITS];
 
         let in_window = |node: i16| i32::from(node) > cutoff;
         let mut depth = depth;
@@ -394,17 +368,6 @@ impl MatchFinder {
         let seq4 = load32(here, 0);
         'out: {
             if best_len < 4 {
-                if !in_window(node3) {
-                    break 'out;
-                }
-                if best_len < 3 {
-                    if let Some((c, m)) = search.candidate(node3) {
-                        if load32(c, 0) << 8 == seq4 << 8 {
-                            best_len = 3;
-                            best = m;
-                        }
-                    }
-                }
                 if !in_window(node4) {
                     break 'out;
                 }
@@ -485,20 +448,18 @@ impl MatchFinder {
         if count + SEARCH_NBYTES as usize > buf.len() - cur {
             return;
         }
-        let [mut h3, mut h4] = self.next_hashes;
+        let mut h4 = self.next_hashes[0];
         let mut rel = self.relative_span(tables, cur, count);
         // The 4 bytes at each position after one inserted.
         for next in buf[cur + 1..cur + count + 4].windows(4) {
-            tables.hash3[h3 & MASK3] = rel as u16;
             tables.next[rel & (WINDOW - 1)] = tables.hash4[h4 & MASK4];
             tables.hash4[h4 & MASK4] = rel as u16;
             let seq = u32::from_le_bytes(next.try_into().unwrap());
-            h3 = hash(seq & 0xFF_FFFF, self.shift3) & MASK3;
             h4 = hash(seq, self.shift4) & MASK4;
             rel = rel.wrapping_add(1);
         }
-        self.next_hashes = [h3, h4];
-        self.next_heads = [tables.hash3[h3], tables.hash4[h4]];
+        self.next_hashes = [h4, 0];
+        self.next_heads = [tables.hash4[h4], EMPTY_BITS];
     }
 
     /// hc: inserts the `count` positions from `from` that a match at
@@ -510,7 +471,7 @@ impl MatchFinder {
     /// run past it) are those `offset` before. So once the last `depth *
     /// offset` such positions are in, each earlier one has `depth` newer
     /// entries with the same bytes ahead of it in its chain, and no search
-    /// walks that far; nor is it the newest in its 3-byte bucket.
+    /// walks that far.
     #[inline(always)]
     pub(super) fn hc_skip_match(
         &mut self,
@@ -822,28 +783,61 @@ mod tests {
         /// parser's half of it.
         #[test]
         fn skip_match_leaves_out_only_unreachable_inserts(r in repeating()) {
-            let Repeating { data, start, len, depth, period } = r;
-            let mut mem = [vec![0; LZ_TABLES_LEN], vec![0; LZ_TABLES_LEN]];
-            let [m0, m1] = &mut mem;
-            let (mut ta, _) = LzTables::carve(m0);
-            let (mut tb, _) = LzTables::carve(m1);
-            let (mut a, mut b) = (MatchFinder::new(), MatchFinder::new());
-            a.reset(&mut ta, 0, 0, None);
-            b.reset(&mut tb, 0, 0, None);
-            a.hc_skip(&mut ta, &data, 0, start as u32 + 1);
-            b.hc_skip(&mut tb, &data, 0, start as u32 + 1);
-            a.hc_skip(&mut ta, &data, start + 1, len as u32 - 1);
-            b.hc_skip_match(&mut tb, &data, start + 1, len as u32 - 1, period as u32, depth);
-            let lim = Limits { max: 258, nice: 258 };
-            for cur in start + len..data.len() - 300 {
-                let d = if cur.is_multiple_of(2) { depth } else { (depth >> 1).max(1) };
-                prop_assert_eq!(
-                    a.hc_longest(&mut ta, &data, cur, 2, lim, d),
-                    b.hc_longest(&mut tb, &data, cur, 2, lim, d),
-                    "position {}", cur
-                );
-            }
+            hc_skip_match_case(&r)?;
         }
+
+    }
+
+    /// Two match finders' tables, side by side.
+    fn two_tables(mem: &mut [Vec<u16>; 2]) -> [LzTables<'_>; 2] {
+        let [m0, m1] = mem;
+        [LzTables::carve(m0).0, LzTables::carve(m1).0]
+    }
+
+    fn hc_skip_match_case(r: &Repeating) -> Result<(), TestCaseError> {
+        let &Repeating {
+            ref data,
+            start,
+            len,
+            depth,
+            period,
+        } = r;
+        let mut mem = [vec![0; LZ_TABLES_LEN], vec![0; LZ_TABLES_LEN]];
+        let [mut ta, mut tb] = two_tables(&mut mem);
+        let (mut a, mut b) = (MatchFinder::new(), MatchFinder::new());
+        a.reset(&mut ta, 0, 0, None);
+        b.reset(&mut tb, 0, 0, None);
+        a.hc_skip(&mut ta, data, 0, start as u32 + 1);
+        b.hc_skip(&mut tb, data, 0, start as u32 + 1);
+        a.hc_skip(&mut ta, data, start + 1, len as u32 - 1);
+        b.hc_skip_match(
+            &mut tb,
+            data,
+            start + 1,
+            len as u32 - 1,
+            period as u32,
+            depth,
+        );
+        let lim = Limits {
+            max: 258,
+            nice: 258,
+        };
+        // The shortest match is 4.
+        let best = 3;
+        for cur in start + len..data.len() - 300 {
+            let d = if cur.is_multiple_of(2) {
+                depth
+            } else {
+                (depth >> 1).max(1)
+            };
+            prop_assert_eq!(
+                a.hc_longest(&mut ta, data, cur, best, lim, d),
+                b.hc_longest(&mut tb, data, cur, best, lim, d),
+                "position {}",
+                cur
+            );
+        }
+        Ok(())
     }
 
     /// Every match the finders report is real and within the window, across

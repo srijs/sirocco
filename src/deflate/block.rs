@@ -91,9 +91,13 @@ impl Seq {
 /// libdeflate's block splitter: count "observations" of literals (by their
 /// top two and lowest bits) and matches (short or long), and end the block
 /// when the recent distribution differs enough from the block's so far.
+///
+/// The observations of each type are sums of the block's symbol counts, so
+/// they're taken from those at each check, not counted symbol by symbol:
+/// the same decisions, with less work in the parsers' loops.
 #[derive(Clone, Debug)]
 struct SplitStats {
-    new_observations: [u32; NUM_OBSERVATION_TYPES],
+    /// The observations of each type up to the last check.
     observations: [u32; NUM_OBSERVATION_TYPES],
     num_new_observations: u32,
     num_observations: u32,
@@ -105,20 +109,28 @@ const NUM_OBSERVATIONS_PER_BLOCK_CHECK: u32 = 512;
 
 impl SplitStats {
     const NEW: SplitStats = SplitStats {
-        new_observations: [0; NUM_OBSERVATION_TYPES],
         observations: [0; NUM_OBSERVATION_TYPES],
         num_new_observations: 0,
         num_observations: 0,
     };
 
-    /// Whether the block of `len` bytes so far should end, once enough new
-    /// observations are in.
-    fn should_end(&mut self, len: usize) -> bool {
+    /// Whether the block of `len` bytes so far, with symbol counts
+    /// `litlen_freqs`, should end, once enough new observations are in.
+    fn should_end(&mut self, len: usize, litlen_freqs: &[u32; NUM_LITLEN_SYMS]) -> bool {
+        let totals = observation_totals(litlen_freqs);
+        let mut new_observations = [0; NUM_OBSERVATION_TYPES];
+        for ((new, &total), &old) in new_observations
+            .iter_mut()
+            .zip(&totals)
+            .zip(&self.observations)
+        {
+            *new = total - old;
+        }
         if self.num_observations > 0 {
             // The sum of absolute differences of the probabilities, all
             // scaled by both observation counts.
             let mut delta = 0u32;
-            for (&old, &new) in self.observations.iter().zip(&self.new_observations) {
+            for (&old, &new) in self.observations.iter().zip(&new_observations) {
                 let expected = old * self.num_new_observations;
                 let actual = new * self.num_observations;
                 delta += expected.abs_diff(actual);
@@ -134,12 +146,27 @@ impl SplitStats {
                 return true;
             }
         }
-        for (old, new) in self.observations.iter_mut().zip(&mut self.new_observations) {
-            *old += core::mem::take(new);
-        }
+        self.observations = totals;
         self.num_observations += core::mem::take(&mut self.num_new_observations);
         false
     }
+}
+
+/// The observations of each type in symbol counts `litlen_freqs`: literals
+/// by their top two and lowest bits, then matches shorter than 9 (length
+/// symbols up to 262) and longer.
+fn observation_totals(litlen_freqs: &[u32; NUM_LITLEN_SYMS]) -> [u32; NUM_OBSERVATION_TYPES] {
+    let mut totals = [0; NUM_OBSERVATION_TYPES];
+    for (quarter, lits) in litlen_freqs[..256].as_chunks::<64>().0.iter().enumerate() {
+        for pair in lits.as_chunks::<2>().0 {
+            totals[2 * quarter] += pair[0];
+            totals[2 * quarter + 1] += pair[1];
+        }
+    }
+    let (short, long) = litlen_freqs[FIRST_LEN_SYM..].split_at(6);
+    totals[NUM_LITERAL_OBSERVATION_TYPES] = short.iter().sum();
+    totals[NUM_LITERAL_OBSERVATION_TYPES + 1] = long.iter().sum();
+    totals
 }
 
 /// The block being built.
@@ -223,7 +250,6 @@ impl Block {
     pub(super) fn count_literal<const OBSERVE: bool>(&mut self, lit: u8) {
         self.litlen_freqs[lit as usize] += 1;
         if OBSERVE {
-            self.split.new_observations[(((lit >> 5) & 6) | (lit & 1)) as usize] += 1;
             self.split.num_new_observations += 1;
         }
     }
@@ -250,7 +276,6 @@ impl Block {
         self.litlen_freqs[FIRST_LEN_SYM + LENGTH_SLOT[len as usize] as usize] += 1;
         self.offset_freqs[slot as usize] += 1;
         if OBSERVE {
-            self.split.new_observations[NUM_LITERAL_OBSERVATION_TYPES + usize::from(len >= 9)] += 1;
             self.split.num_new_observations += 1;
         }
         seqs[n] = Seq {
@@ -269,7 +294,7 @@ impl Block {
         self.split.num_new_observations >= NUM_OBSERVATIONS_PER_BLOCK_CHECK
             && pos - self.start >= MIN_BLOCK_LENGTH
             && rest.is_none_or(|r| r >= MIN_BLOCK_LENGTH)
-            && self.split.should_end(pos - self.start)
+            && self.split.should_end(pos - self.start, &self.litlen_freqs)
     }
 
     /// The minimum match length worth using, from how many distinct literals
@@ -288,10 +313,14 @@ impl Block {
 /// from libdeflate. With few distinct literals, literals are cheap and
 /// short matches don't pay (DNA, for one, gains a lot).
 fn choose_min_len(used_literals: usize, depth: u32) -> u32 {
+    // libdeflate's rows, 16 entries each, so they can be checked by eye.
+    #[rustfmt::skip]
     const MIN_LENS: [u8; 80] = [
-        9, 9, 9, 9, 9, 9, 8, 8, 7, 7, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-        5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-        4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+        9, 9, 9, 9, 9, 9, 8, 8, 7, 7, 6, 6, 6, 6, 6, 6,
+        5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+        5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 4, 4, 4,
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
     ];
     let Some(&min_len) = MIN_LENS.get(used_literals) else {
         return MIN_MATCH;
@@ -319,4 +348,24 @@ pub(super) fn calculate_min_len(data: &[u8], len: usize, depth: u32) -> u32 {
         used[b as usize] = true;
     }
     choose_min_len(used.iter().filter(|&&u| u).count(), depth)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// libdeflate's boundaries: a hand copy once lost two entries, which
+    /// gave data with 43 or 44 distinct literals (as VCF) a minimum of 4.
+    #[test]
+    fn min_len_steps_where_libdeflates_do() {
+        let at = |used| choose_min_len(used, 16);
+        let steps: alloc::vec::Vec<(usize, u32)> = (0..=256)
+            .filter(|&n| n == 0 || at(n) != at(n - 1))
+            .map(|n| (n, at(n)))
+            .collect();
+        assert_eq!(
+            steps,
+            [(0, 9), (6, 8), (8, 7), (10, 6), (16, 5), (45, 4), (80, 3)]
+        );
+    }
 }
