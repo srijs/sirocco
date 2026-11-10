@@ -38,15 +38,15 @@ const fn can_consume_and_then_preload(consume: u32, preload: u32) -> bool {
     CONSUMABLE_NBITS >= consume && FASTLOOP_PRELOADABLE_NBITS >= consume + preload
 }
 
-/// Worst-case output bytes written per fastloop iteration: two literals, a
-/// max-length match, and the word-copy overrun. (Three literals and no match
-/// write three bytes.)
-const FASTLOOP_MAX_BYTES_WRITTEN: usize = 2 + MAX_MATCH_LEN + (5 * WORDBYTES) - 1;
+/// Worst-case output bytes written per fastloop iteration: two literal
+/// entries, each of which may be a pair, a max-length match, and the
+/// word-copy overrun. (Three literal entries and no match write six bytes.)
+const FASTLOOP_MAX_BYTES_WRITTEN: usize = 4 + MAX_MATCH_LEN + (5 * WORDBYTES) - 1;
 
 /// Output bytes that the tail fastloop needs ahead of it to start an
-/// iteration: room for the three literals it may write. It checks that each
-/// match fits as it comes up.
-const TAIL_MIN_OUT_ROOM: usize = 3;
+/// iteration: room for the three literal entries it may write, each of which
+/// may be a pair. It checks that each match fits as it comes up.
+const TAIL_MIN_OUT_ROOM: usize = 6;
 
 /// Worst-case input bytes read per fastloop iteration, including the word
 /// that a branchless refill reads past `in_next`.
@@ -87,6 +87,62 @@ const fn bitmask(n: u32) -> BitBuf {
 /// The value a length or offset entry decodes to: its base plus the extra
 /// bits that follow the codeword in `saved`, the bit buffer from before the
 /// entry was consumed. With BMI2 enabled the masking compiles to `bzhi`.
+/// Whether a dynamic block's litlen table should get literal pair entries,
+/// with `input` compressed bytes left to decode it from and room for `room`
+/// bytes of output: whether its literals are likely enough to repay building
+/// them, a fixed cost per table. Not with too little input (small streams,
+/// such as git objects), nor, when that is all the input there is, with
+/// output so much larger than it (highly compressible data, such as VCF, whose
+/// tables each decode few literals).
+#[inline(never)]
+fn pairs_pay(input: usize, room: usize, more_input: bool) -> bool {
+    input >= PAIRS_MIN_INPUT && (more_input || room <= input.saturating_mul(PAIRS_MAX_RATIO))
+}
+
+/// See [`pairs_pay`].
+const PAIRS_MIN_INPUT: usize = 2048;
+const PAIRS_MAX_RATIO: usize = 16;
+
+/// 1 for a pair entry, 0 for a single literal: how many literals past the
+/// first an entry writes.
+#[inline(always)]
+fn pair_bit(entry: u32) -> usize {
+    ((entry & HUFFDEC_PAIR) >> HUFFDEC_PAIR.trailing_zeros()) as usize
+}
+
+/// Writes a pair entry `entry` from the generic loop to `output` at `out_pos`,
+/// with `bits` the bit buffer just past it and `saved_bitbuf` the one before,
+/// and returns the bit buffer after. With room for its first literal only
+/// (`room_for_one`), it puts the pair's bits back and takes just that
+/// codeword's; the second literal goes on its own, once there's room. Rare
+/// (pairs reach the generic loop only near the ends of the input or output),
+/// so out of line, which keeps the generic loop as compact as without pairs.
+/// It takes and returns only the bit buffer, which fits in registers: the
+/// whole cursor would go through memory, and keep the loop's cursor there.
+#[cold]
+#[inline(never)]
+fn pair_in_generic_loop<const WRITE: bool>(
+    output: &mut [u8],
+    out_pos: usize,
+    room_for_one: bool,
+    mut bits: Bits,
+    entry: u32,
+    saved_bitbuf: BitBuf,
+) -> Bits {
+    if room_for_one {
+        bits.buf = saved_bitbuf;
+        bits.left = bits.left.wrapping_add(entry);
+        bits.consume((entry >> PAIR_FIRST_LEN_SHIFT) & 15);
+        if WRITE {
+            output[out_pos] = (entry >> 8) as u8;
+        }
+    } else if WRITE {
+        output[out_pos] = (entry >> 8) as u8;
+        output[out_pos + 1] = (entry >> 16) as u8;
+    }
+    bits
+}
+
 #[inline(always)]
 fn entry_value(entry: u32, saved: BitBuf) -> usize {
     (entry >> 16) as usize + ((saved & bitmask(entry as u8 as u32)) >> (entry >> 8) as u8)
@@ -380,7 +436,7 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
     } = *s;
     let mut saved_bitbuf: BitBuf;
     let mut entry: u32;
-    let litlen_tablemask = bitmask(LITLEN_TABLEBITS);
+    let litlen_tablemask = t.litlen_mask();
     // The input not yet refilled from.
     let mut rest = &input[in_pos..];
 
@@ -391,14 +447,15 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
         };
     }
 
-    // Writes the literal of the literal entry `$e`.
+    // Writes the literal of the literal entry `$e`, or both of a pair's: two
+    // bytes either way, without a branch, advancing by one or two.
     macro_rules! write_literal {
         ($e:expr) => {
             let e: u32 = $e;
             if WRITE {
-                output[out_pos] = (e >> 8) as u8;
+                *output[out_pos..].first_chunk_mut().unwrap() = [(e >> 8) as u8, (e >> 16) as u8];
             }
-            out_pos += 1;
+            out_pos += 1 + pair_bit(e);
         };
     }
 
@@ -418,7 +475,7 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
             break 'done FastExit::Margin;
         }
         refill!();
-        entry = t.litlen[bits.peek(LITLEN_TABLEBITS)];
+        entry = t.litlen[bits.buf & litlen_tablemask];
         loop {
             // Room for all that an iteration reads and writes. Besides
             // keeping clear of the buffers' ends, this lets the compiler
@@ -436,11 +493,11 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
                     // A literal that needed no subtable. On 64-bit,
                     // decode up to two more right away.
                     if EXTRA_LITERALS {
-                        // Up to three literals, written to `run`.
-                        // Without writes, a scratch array that the
-                        // compiler removes.
-                        let mut scratch = [0; 3];
-                        let run: &mut [u8; 3] = if WRITE {
+                        // Up to three literal entries, each of which may
+                        // be a pair, written to `run`. Without writes, a
+                        // scratch array that the compiler removes.
+                        let mut scratch = [0; 6];
+                        let run: &mut [u8; 6] = if WRITE {
                             output[out_pos..].first_chunk_mut().unwrap()
                         } else {
                             &mut scratch
@@ -449,8 +506,9 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
                         macro_rules! write_literal {
                             ($e:expr) => {
                                 let e: u32 = $e;
-                                run[n] = (e >> 8) as u8;
-                                n += 1;
+                                *run[n..].first_chunk_mut().unwrap() =
+                                    [(e >> 8) as u8, (e >> 16) as u8];
+                                n += 1 + pair_bit(e);
                             };
                         }
                         let lit = entry;
@@ -1060,6 +1118,7 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                     bad!();
                 }
 
+                t.pairs = pairs_pay(input.len() - c.in_pos, out_len - c.out_pos, more_input);
                 if !t.build_dynamic(num_litlen_syms, num_offset_syms) {
                     bad!();
                 }
@@ -1159,6 +1218,9 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
 
             // The generic loop, for when the input or output is near its end.
             // Not usually performance-critical.
+            // The litlen main table's mask: the table can't change in the block.
+            let litlen_mask = t.litlen_mask();
+
             loop {
                 if more_input && c.consumed_overread() {
                     pause!(last.0, last.1, true);
@@ -1168,7 +1230,7 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                     last = (c, Some(is_final_block));
                 }
                 refill_bits!();
-                let mut entry = t.litlen[c.bits.peek(LITLEN_TABLEBITS)];
+                let mut entry = t.litlen[c.bits.buf & litlen_mask];
                 let mut saved_bitbuf = c.bits.buf;
                 c.bits.consume_entry(entry);
                 // Literal entries keep the literal in the bits that would
@@ -1182,6 +1244,19 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                 if entry & HUFFDEC_LITERAL != 0 {
                     if c.out_pos == out_len {
                         full!(symbol_start, Some(is_final_block));
+                    }
+                    if entry & HUFFDEC_PAIR != 0 {
+                        let one = out_len - c.out_pos == 1;
+                        c.bits = pair_in_generic_loop::<WRITE>(
+                            output,
+                            c.out_pos,
+                            one,
+                            c.bits,
+                            entry,
+                            saved_bitbuf,
+                        );
+                        c.out_pos += 2 - one as usize;
+                        continue;
                     }
                     if WRITE {
                         output[c.out_pos] = (entry >> 8) as u8;
