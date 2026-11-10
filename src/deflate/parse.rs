@@ -40,6 +40,21 @@ pub(super) enum Strategy {
     Lazy,
 }
 
+/// The shortest match the hash chains find: they take no 3-byte matches
+/// (libdeflate's take close ones), which cost more than they save on most
+/// data, and keeping a table for them costs every position.
+const CHAIN_MIN_MATCH: u32 = 4;
+
+/// The fast levels' settings, which their loops take as constants (as
+/// variables, they cost each loop registers it is short of): the hash
+/// table's bucket size (`depth`), `insert` and `accel`, for levels 1 to 3.
+/// Their nice length is [`FAST_NICE`].
+pub(super) const FAST_LEVELS: [(u32, u32, u32); 3] = [(1, 0, 12), (1, 16, 4), (2, 32, 4)];
+pub(super) const FAST_NICE: u32 = 32;
+const FAST1: (u32, u32, u32) = FAST_LEVELS[0];
+const FAST2: (u32, u32, u32) = FAST_LEVELS[1];
+const FAST3: (u32, u32, u32) = FAST_LEVELS[2];
+
 /// A level's parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Params {
@@ -152,16 +167,73 @@ impl Parser {
         stop: usize,
         end: Option<usize>,
     ) -> bool {
-        // The match finder's state in a local, which the loops can keep in
-        // registers.
-        let mut mf = self.mf;
-        let ended = match p.strategy {
+        match p.strategy {
             Strategy::Stored => self.stored(stop, end),
-            Strategy::Fast if p.depth == 1 => self.fast::<1>(&mut mf, t, p, buf, stop, end),
-            Strategy::Fast => self.fast::<2>(&mut mf, t, p, buf, stop, end),
-            Strategy::Greedy => self.greedy(&mut mf, t, p, buf, stop, end),
-            Strategy::Lazy => self.lazy(&mut mf, t, p, buf, stop, end),
-        };
+            Strategy::Fast => match (p.depth, p.insert, p.accel) {
+                FAST1 => self.parse_fast::<{ FAST1.0 as usize }, { FAST1.1 }, { FAST1.2 }>(
+                    t, buf, stop, end,
+                ),
+                FAST2 => self.parse_fast::<{ FAST2.0 as usize }, { FAST2.1 }, { FAST2.2 }>(
+                    t, buf, stop, end,
+                ),
+                // The fast levels have only these settings.
+                _ => {
+                    debug_assert_eq!((p.depth, p.insert, p.accel), FAST3);
+                    self.parse_fast::<{ FAST3.0 as usize }, { FAST3.1 }, { FAST3.2 }>(
+                        t, buf, stop, end,
+                    )
+                }
+            },
+            Strategy::Greedy => self.parse_greedy(t, p, buf, stop, end),
+            Strategy::Lazy => self.parse_lazy(t, p, buf, stop, end),
+        }
+    }
+
+    // Each parser in a function of its own, with the match finder's state in
+    // a local that its loop can keep in registers: inlined together, each
+    // loop's registers are allocated over all of them, and which loop spills
+    // (and is 1-5% slower) changes with any change to the others.
+
+    #[inline(never)]
+    fn parse_fast<const B: usize, const INSERT: u32, const ACCEL: u32>(
+        &mut self,
+        t: &mut Tables<'_>,
+        buf: &[u8],
+        stop: usize,
+        end: Option<usize>,
+    ) -> bool {
+        let mut mf = self.mf;
+        let ended = self.fast::<B, INSERT, ACCEL>(&mut mf, t, buf, stop, end);
+        self.mf = mf;
+        ended
+    }
+
+    #[inline(never)]
+    fn parse_greedy(
+        &mut self,
+        t: &mut Tables<'_>,
+        p: Params,
+        buf: &[u8],
+        stop: usize,
+        end: Option<usize>,
+    ) -> bool {
+        let mut mf = self.mf;
+        let ended = self.greedy(&mut mf, t, p, buf, stop, end);
+        self.mf = mf;
+        ended
+    }
+
+    #[inline(never)]
+    fn parse_lazy(
+        &mut self,
+        t: &mut Tables<'_>,
+        p: Params,
+        buf: &[u8],
+        stop: usize,
+        end: Option<usize>,
+    ) -> bool {
+        let mut mf = self.mf;
+        let ended = self.lazy(&mut mf, t, p, buf, stop, end);
         self.mf = mf;
         ended
     }
@@ -173,11 +245,10 @@ impl Parser {
     }
 
     #[inline(always)]
-    fn fast<const B: usize>(
+    fn fast<const B: usize, const INSERT: u32, const ACCEL: u32>(
         &mut self,
         mf: &mut MatchFinder,
         t: &mut Tables<'_>,
-        p: Params,
         buf: &[u8],
         stop: usize,
         end: Option<usize>,
@@ -194,7 +265,7 @@ impl Parser {
         while pos < limit {
             // Computed without branching, so that the search's bounds
             // checks fold away.
-            let lim = Limits::at(buf.len(), pos, p.nice);
+            let lim = Limits::at(buf.len(), pos, FAST_NICE);
             if lim.max < SEARCH_NBYTES {
                 // Too near the end to search.
                 for &b in &buf[pos..limit] {
@@ -220,7 +291,7 @@ impl Parser {
                 let mut ahead = 0;
                 let mut nice = lim.nice;
                 while len < nice && pos + 1 < buf.len() {
-                    let lim = Limits::at(buf.len(), pos + 1, p.nice);
+                    let lim = Limits::at(buf.len(), pos + 1, FAST_NICE);
                     if lim.max <= len {
                         break;
                     }
@@ -239,7 +310,7 @@ impl Parser {
                 }
                 block.store_match::<false>(seqs, n, lits, len, offset);
                 (n, lits) = (n + 1, 0);
-                if len <= p.insert {
+                if len <= INSERT {
                     mf.ht_skip::<B>(lz, buf, pos + 1 + ahead, len - 1 - ahead as u32);
                 } else {
                     // Only the match's last position, so that runs still
@@ -254,9 +325,9 @@ impl Parser {
                 block.count_literal::<false>(buf[pos]);
                 lits += 1;
                 pos += 1;
-                if p.accel > 0 && mf.warm {
+                if ACCEL > 0 && mf.warm {
                     misses += 1;
-                    let step = misses * p.accel / 64;
+                    let step = misses * ACCEL / 64;
                     if step > 0 {
                         // Skip searching the next few positions.
                         let end = (pos + step as usize).min(limit);
@@ -289,17 +360,17 @@ impl Parser {
         let limit = stop.min(max_end);
         let block = &mut self.block;
         let (lz, seqs) = (&mut t.lz, &mut *t.seqs);
-        let min_len = self.min_len;
+        let min_len = self.min_len.max(CHAIN_MIN_MATCH);
         let mut pos = self.pos;
         let mut misses = 0u32;
         while pos < limit {
             let lim = Limits::at(buf.len(), pos, p.nice);
             let (len, offset) = mf.hc_longest(lz, buf, pos, min_len - 1, lim, p.depth);
-            if len >= min_len && (len > MIN_MATCH || offset <= 4096) {
+            if len >= min_len {
                 misses = 0;
                 block.matched::<true>(seqs, len, offset);
                 if len <= p.insert {
-                    mf.hc_skip(lz, buf, pos + 1, len - 1);
+                    mf.hc_skip_match(lz, buf, pos + 1, len - 1, offset, p.depth);
                 } else {
                     let last = pos + len as usize - 1;
                     mf.jump(lz, buf, last);
@@ -353,11 +424,11 @@ impl Parser {
                 self.min_len = block.recalculate_min_len(p.depth);
                 self.next_recalc += (pos - block.start).max(1);
             }
-            let min_len = self.min_len;
+            let min_len = self.min_len.max(CHAIN_MIN_MATCH);
             let lim = Limits::at(buf.len(), pos, p.nice);
             let (mut cur_len, mut cur_offset) =
                 mf.hc_longest(lz, buf, pos, min_len - 1, lim, p.depth);
-            if cur_len < min_len || (cur_len == MIN_MATCH && cur_offset > 8192) {
+            if cur_len < min_len {
                 block.literal::<true>(buf[pos]);
                 pos += 1;
             } else {

@@ -1,7 +1,7 @@
 //! [`Encoder`] and the state machine behind it.
 
 use super::block::MAX_BLOCK_LENGTH;
-use super::parse::{Params, Parser, Strategy, Tables, LOOKAHEAD};
+use super::parse::{Params, Parser, Strategy, Tables, FAST_LEVELS, FAST_NICE, LOOKAHEAD};
 use super::tables::WINDOW;
 use super::write::Writer;
 use super::{Flush, Level};
@@ -65,7 +65,7 @@ encoder! {
 /// ```
 ///
 /// Most of its memory is its tables, [`TABLES_LEN`](super::TABLES_LEN)
-/// `u16`s (about 340 KiB), for finding matches and holding the block being
+/// `u16`s (about 280 KiB), for finding matches and holding the block being
 /// built. They are kept apart from the encoder, which is a few KiB, so that
 /// they are never on the stack: [`new`](Encoder::new) (with the `alloc`
 /// feature) allocates them zeroed, and nothing else is ever allocated;
@@ -175,22 +175,30 @@ pub struct Progress<'o> {
     pub full: bool,
 }
 
-/// The parameters for a level: the fastest found that compress at least as
-/// well as zlib's level does, on both the Silesia corpus and server logs
-/// (JSON and access logs). Levels 1 to 3 search the hash table lazily, 4 the
-/// hash chains greedily, and 5 to 9 lazily, ever deeper.
+/// The parameters for a level: the fastest found that compress about as well
+/// as zlib's level does, on the Silesia corpus and server logs (JSON and
+/// access logs). Levels 1 to 3 search the hash table lazily, 4 the hash
+/// chains greedily, and 5 to 9 lazily, ever deeper.
+///
+/// No level takes 3-byte matches, which saves a table update at every
+/// position: levels 4 to 9 are 5-30% faster for it on most data. Where
+/// 3-byte matches pay, as in some of Silesia's binary files, levels 4 to 9
+/// compress up to 1% less well than zlib's (and on DNA-like data, as BAM
+/// records, better: short matches there cost more than the literals they
+/// replace).
 const fn params(level: Level) -> Params {
     use Strategy::*;
     // Unlimited inserts.
     const ALL: u32 = u32::MAX;
     let (strategy, depth, nice, insert, accel) = match level.0 {
         0 => (Stored, 0, 0, 0, 0),
-        1 => (Fast, 1, 32, 0, 12),
-        2 => (Fast, 1, 32, 16, 4),
-        3 => (Fast, 2, 32, 32, 4),
-        4 => (Greedy, 6, 32, 32, 2),
-        5 => (Lazy, 6, 32, ALL, 0),
-        6 => (Lazy, 16, 30, ALL, 0),
+        1..=3 => {
+            let (depth, insert, accel) = FAST_LEVELS[level.0 as usize - 1];
+            (Fast, depth, FAST_NICE, insert, accel)
+        }
+        4 => (Greedy, 6, 32, ALL, 2),
+        5 => (Lazy, 7, 32, ALL, 0),
+        6 => (Lazy, 16, 48, ALL, 0),
         7 => (Lazy, 24, 48, ALL, 0),
         8 => (Lazy, 35, 65, ALL, 0),
         _ => (Lazy, 48, 96, ALL, 0),
@@ -519,7 +527,8 @@ impl State {
             buf.len()
         };
         let before = self.parser.pos;
-        let ended = self.parser.parse(t, p, buf, stop.max(before), end);
+        let stop = stop.max(before);
+        let ended = self.parser.parse(t, p, buf, stop, end);
         let pos = self.parser.pos;
         self.update_check(&buf[before..pos]);
         self.total_in += (pos - before) as u64;
