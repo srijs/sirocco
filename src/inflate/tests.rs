@@ -195,6 +195,14 @@ fn in_sizes() -> impl Strategy<Value = Vec<usize>> {
         })
 }
 
+/// `len` bytes that repeat with period 251, changing every 1000 bytes:
+/// compressible, with both matches and literals.
+fn patterned(len: u32) -> Vec<u8> {
+    (0..len)
+        .map(|i| (i % 251) as u8 ^ (i / 1000) as u8)
+        .collect()
+}
+
 fn buf_len() -> impl Strategy<Value = usize> {
     prop_oneof![
         // The least that can make room: just over the window.
@@ -206,9 +214,7 @@ fn buf_len() -> impl Strategy<Value = usize> {
 
 #[test]
 fn one_shot_decodes_into_an_exact_buffer() {
-    let data: Vec<u8> = (0..300_000u32)
-        .map(|i| (i % 251) as u8 ^ (i / 1000) as u8)
-        .collect();
+    let data = patterned(300_000);
     for format in FORMATS {
         let mut c = reference_compress(format, 6, &data);
         let n = c.len();
@@ -274,9 +280,7 @@ fn a_full_buffer_needs_room() {
 
 #[test]
 fn the_buffer_can_move_and_grow() {
-    let data: Vec<u8> = (0..300_000u32)
-        .map(|i| (i % 251) as u8 ^ (i / 1000) as u8)
-        .collect();
+    let data = patterned(300_000);
     for format in FORMATS {
         let c = reference_compress(format, 6, &data);
         for piece in [7, 1000, usize::MAX] {
@@ -377,27 +381,9 @@ fn input_too_short_for_a_trailer_is_truncated() {
 fn a_preset_dictionary_is_its_own_error() {
     // A valid zlib header with FDICT set, then a dictionary id.
     let input = [0x78, 0x20, 0, 0, 0, 0, 0x03, 0x00, 0, 0, 0, 1];
-    assert_eq!(
-        one_shot(Format::Zlib, &input, 10),
-        Err(Error::PresetDictionary)
-    );
-    assert_eq!(
-        stream(Format::Zlib, &input, &[1], 1 << 16),
-        Err(Error::PresetDictionary)
-    );
-    assert_eq!(
-        scan(Format::Zlib, &input, &[1]),
-        Err(Error::PresetDictionary)
-    );
-    assert_eq!(
-        crate::decompress(Format::Zlib, &input, 10),
-        Err(Error::PresetDictionary)
-    );
+    assert_fails(Format::Zlib, &input, Error::PresetDictionary);
     // The same bit in a header that is wrong anyway is just bad data.
-    assert_eq!(
-        one_shot(Format::Zlib, b"invalid zlib", 10),
-        Err(Error::BadData)
-    );
+    assert_fails(Format::Zlib, b"invalid zlib", Error::BadData);
 }
 
 #[test]
@@ -593,23 +579,35 @@ fn padded(c: &[u8]) -> Vec<u8> {
     [c, &[0; 16]].concat()
 }
 
-/// Checks that every decoder rejects the raw DEFLATE stream `c` (padded) as
-/// bad data: in one call into `out_lens` byte buffers, in pieces, scanning
-/// and into a `Vec`.
-fn assert_rejected(c: &[u8], out_lens: &[usize], what: &str) {
-    let c = &padded(c);
+/// Checks that every decoder fails on `input` with `want`: in one call into
+/// `out_lens` byte buffers, in pieces, scanning (unless `want` is a checksum
+/// mismatch, which a scan can't see) and into a `Vec`.
+fn assert_fails_in(format: Format, input: &[u8], want: Error, out_lens: &[usize], what: &str) {
     for &len in out_lens {
-        let r = one_shot(Format::Deflate, c, len);
-        assert_eq!(r, Err(Error::BadData), "{what}: one-shot into {len}");
+        let r = one_shot(format, input, len).map(|_| ());
+        assert_eq!(r, Err(want), "{what}: one-shot into {len}");
     }
     for sizes in [&[1][..], &[7, 300], &[usize::MAX >> 1]] {
-        let r = stream(Format::Deflate, c, sizes, 1 << 16);
-        assert_eq!(r, Err(Error::BadData), "{what}: stream in {sizes:?}");
-        let r = scan(Format::Deflate, c, sizes);
-        assert_eq!(r, Err(Error::BadData), "{what}: scan in {sizes:?}");
+        let r = stream(format, input, sizes, 1 << 16).map(|_| ());
+        assert_eq!(r, Err(want), "{what}: stream in {sizes:?}");
+        if want != Error::ChecksumMismatch {
+            let r = scan(format, input, sizes).map(|_| ());
+            assert_eq!(r, Err(want), "{what}: scan in {sizes:?}");
+        }
     }
-    let r = crate::decompress(Format::Deflate, c, 1 << 20);
-    assert_eq!(r, Err(Error::BadData), "{what}: Vec");
+    let r = crate::decompress(format, input, 1 << 20);
+    assert_eq!(r, Err(want), "{what}: Vec");
+}
+
+/// [`assert_fails_in`] for short input, into 100-byte buffers.
+fn assert_fails(format: Format, input: &[u8], want: Error) {
+    assert_fails_in(format, input, want, &[100], &format!("{input:x?}"));
+}
+
+/// Checks that every decoder rejects the raw DEFLATE stream `c` (padded) as
+/// bad data, as [`assert_fails_in`].
+fn assert_rejected(c: &[u8], out_lens: &[usize], what: &str) {
+    assert_fails_in(Format::Deflate, &padded(c), Error::BadData, out_lens, what);
 }
 
 /// Checks that every decoder decodes the raw DEFLATE stream `c` (padded) to
@@ -764,9 +762,7 @@ fn an_incomplete_precode_is_rejected() {
 #[test]
 fn reader_stops_at_the_end_of_the_stream() {
     use std::io::{BufReader, Read};
-    let data: Vec<u8> = (0..300_000u32)
-        .map(|i| (i % 251) as u8 ^ (i / 1000) as u8)
-        .collect();
+    let data = patterned(300_000);
     for format in FORMATS {
         let mut c = reference_compress(format, 6, &data);
         c.extend_from_slice(b"next");
@@ -836,9 +832,7 @@ fn reader_errors_wrap_the_decode_error() {
 #[test]
 fn scan_reader_stops_at_the_end_of_each_stream() {
     use std::io::{BufReader, Read};
-    let data: Vec<u8> = (0..300_000u32)
-        .map(|i| (i % 251) as u8 ^ (i / 1000) as u8)
-        .collect();
+    let data = patterned(300_000);
     for format in FORMATS {
         let first = reference_compress(format, 6, &data);
         let second = reference_compress(format, 1, b"second");
@@ -974,11 +968,8 @@ fn decompress_from_guess(
     guess: usize,
 ) -> Result<Vec<u8>, Error> {
     let mut out = b"prefix".to_vec();
-    let consumed = VecDecoder {
-        format,
-        tables: Tables::new(),
-    }
-    .decompress_append_from(c, &mut out, 6 + max_len, guess)?;
+    let consumed =
+        VecDecoder::new(format).decompress_append_from(c, &mut out, 6 + max_len, guess)?;
     assert_eq!(consumed, c.len());
     assert_eq!(&out[..6], b"prefix");
     Ok(out.split_off(6))
@@ -990,12 +981,9 @@ fn assert_resumed_errors_match(format: Format, c: &[u8], max_len: usize) {
     let want = one_shot(format, c, max_len)
         .and_then(|(out, consumed)| Ok((consumed, out.ok_or(Error::InsufficientSpace)?)));
     let mut out = Vec::new();
-    let got = VecDecoder {
-        format,
-        tables: Tables::new(),
-    }
-    .decompress_append_from(c, &mut out, max_len, 1)
-    .map(|consumed| (consumed, out));
+    let got = VecDecoder::new(format)
+        .decompress_append_from(c, &mut out, max_len, 1)
+        .map(|consumed| (consumed, out));
     match (&want, &got) {
         (Ok(_), _) => assert_eq!(got, want),
         // The kind of error may differ (bad data or truncated).
@@ -1107,25 +1095,6 @@ fn a_stored_block_cut_off_at_a_full_buffer_is_truncated() {
     assert_eq!(
         crate::decompress(Format::Deflate, &input, 5),
         Err(Error::Truncated)
-    );
-}
-
-/// Asserts every way to decode `input` fails with `want`.
-fn assert_fails(format: Format, input: &[u8], want: Error) {
-    assert_eq!(
-        one_shot(format, input, 100).map(|_| ()),
-        Err(want),
-        "{input:x?}"
-    );
-    assert_eq!(
-        stream(format, input, &[1], 1 << 16).map(|_| ()),
-        Err(want),
-        "{input:x?}"
-    );
-    assert_eq!(
-        crate::decompress(format, input, 100),
-        Err(want),
-        "{input:x?}"
     );
 }
 
@@ -1246,9 +1215,7 @@ fn long_streams_match_one_shot() {
 /// matches may need, so `make_room` can't free any of it.
 #[test]
 fn a_window_sized_buffer_cannot_make_room() {
-    let data: Vec<u8> = (0..100_000u32)
-        .map(|i| (i % 251) as u8 ^ (i / 1000) as u8)
-        .collect();
+    let data = patterned(100_000);
     for format in FORMATS {
         let c = reference_compress(format, 6, &data);
         let mut d = Decoder::new(format);

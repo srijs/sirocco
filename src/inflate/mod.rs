@@ -96,11 +96,7 @@ impl From<Error> for std::io::Error {
 /// See [`crate::decompress`].
 #[cfg(feature = "alloc")]
 pub(crate) fn decompress(format: Format, input: &[u8], max_len: usize) -> Result<Vec<u8>, Error> {
-    VecDecoder {
-        format,
-        tables: Tables::new(),
-    }
-    .decompress(input, max_len)
+    VecDecoder::new(format).decompress(input, max_len)
 }
 
 /// Decompresses whole buffers into a `Vec` that grows as needed.
@@ -112,6 +108,13 @@ struct VecDecoder {
 
 #[cfg(feature = "alloc")]
 impl VecDecoder {
+    fn new(format: Format) -> Self {
+        VecDecoder {
+            format,
+            tables: Tables::new(),
+        }
+    }
+
     /// Decompresses all of `input` into a new `Vec` of at most `max_len`
     /// bytes. A gzip file's members are all decompressed and concatenated.
     fn decompress(&mut self, input: &[u8], max_len: usize) -> Result<Vec<u8>, Error> {

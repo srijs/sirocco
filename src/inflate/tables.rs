@@ -7,7 +7,8 @@
 pub(super) const NUM_PRECODE_SYMS: usize = 19;
 pub(super) const NUM_LITLEN_SYMS: usize = 288;
 pub(super) const NUM_OFFSET_SYMS: usize = 32;
-const MAX_NUM_SYMS: usize = 288;
+/// The most symbols of any code: the litlen code's.
+const MAX_NUM_SYMS: usize = NUM_LITLEN_SYMS;
 
 pub(super) const MAX_PRE_CODEWORD_LEN: u32 = 7;
 pub(super) const MAX_LITLEN_CODEWORD_LEN: u32 = 15;
@@ -34,7 +35,8 @@ pub(super) const LITLEN_TABLEBITS: u32 = 12;
 pub(super) const LITLEN_TABLEBITS_PLAIN: u32 = 11;
 // A bound rather than zlib's exact `enough`: the main table, and at most one
 // subtable of at most 2^(15 - 12) entries per symbol.
-const LITLEN_ENOUGH: usize = (1 << 12) + NUM_LITLEN_SYMS * (1 << (15 - 12));
+const LITLEN_ENOUGH: usize =
+    (1 << LITLEN_TABLEBITS) + NUM_LITLEN_SYMS * (1 << (MAX_LITLEN_CODEWORD_LEN - LITLEN_TABLEBITS));
 pub(super) const OFFSET_TABLEBITS: u32 = 8;
 const OFFSET_ENOUGH: usize = 402;
 
@@ -194,7 +196,7 @@ static OFFSET_DECODE_RESULTS: [u32; NUM_OFFSET_SYMS] = {
 /// which goes into both of the two low bytes (just the lowest for literals,
 /// whose second byte holds the literal).
 #[inline(always)]
-fn make_decode_table_entry(decode_results: &[u32], sym: usize, len: u32) -> u32 {
+const fn make_decode_table_entry(decode_results: &[u32], sym: usize, len: u32) -> u32 {
     let r = decode_results[sym];
     let hi = if r & HUFFDEC_LITERAL != 0 {
         0
@@ -216,7 +218,6 @@ fn make_decode_table_entry(decode_results: &[u32], sym: usize, len: u32) -> u32 
 ///
 /// With `PAIRS` (for the litlen table), the main table also gets an entry for
 /// each two literals whose codewords fit it together.
-#[allow(clippy::too_many_arguments)]
 fn build_decode_table<const PAIRS: bool>(
     decode_table: &mut [u32],
     lens: &[u8],
@@ -254,7 +255,6 @@ fn build_decode_table<const PAIRS: bool>(
     // Sort symbols by codeword length then symbol value, i.e. by codeword,
     // and total up the codespace used on the way. The unused symbols that
     // weren't skipped go after the used ones, out of the way.
-    offsets[1] = 0;
     let mut codespace_used: u32 = 0;
     let mut len = 1;
     while len < max_codeword_len {
@@ -528,7 +528,7 @@ pub(super) struct Tables {
     static_loaded: bool,
     /// The litlen main table's bits: `LITLEN_TABLEBITS` with pair entries,
     /// `LITLEN_TABLEBITS_PLAIN` without.
-    pub(super) litlen_bits: u32,
+    litlen_bits: u32,
 }
 
 impl Tables {
@@ -696,13 +696,7 @@ const fn build_short_code_table<const N: usize>(
             let codeword = next_code[len as usize];
             next_code[len as usize] += 1;
             let reversed = codeword.reverse_bits() >> (32 - len);
-            let r = decode_results[sym];
-            let hi = if r & HUFFDEC_LITERAL != 0 {
-                0
-            } else {
-                len << 8
-            };
-            let entry = r + hi + len;
+            let entry = make_decode_table_entry(decode_results, sym, len);
             let mut j = reversed as usize;
             while j < 1 << table_bits {
                 table[j] = entry;

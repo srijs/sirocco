@@ -312,21 +312,18 @@ impl Resume {
         self.at.in_pos
     }
 
-    /// Moves the input position, for carrying on in a buffer that holds the
-    /// same input at a different offset.
-    pub(super) fn set_in_pos(&mut self, pos: usize) {
-        self.at.in_pos = pos;
-    }
-
     /// Output bytes before the stopping point.
     pub(super) fn out_pos(&self) -> usize {
         self.at.out_pos
     }
 
-    /// Moves the output position, for carrying on in a buffer that holds the
-    /// same recent output (at least the last 32 KiB) at a different offset.
-    pub(super) fn set_out_pos(&mut self, pos: usize) {
-        self.at.out_pos = pos;
+    /// Moves the input position to 0 and the output position to `out_pos`,
+    /// for carrying on with input that starts at the stopping point and a
+    /// buffer that holds the same recent output (at least the last 32 KiB)
+    /// before `out_pos`.
+    pub(super) fn rebase(&mut self, out_pos: usize) {
+        self.at.in_pos = 0;
+        self.at.out_pos = out_pos;
     }
 
     /// Whether it stopped because the input ran out.
@@ -934,16 +931,6 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
         };
     }
 
-    // Pauses inside a stored block with `$left` bytes of it to go.
-    macro_rules! pause_stored {
-        ($left:expr, $is_final_block:expr, $need_input:expr) => {
-            return Ok(Status::Full(Resume {
-                stored_left: $left as u16,
-                ..Resume::new(c, Some($is_final_block), $need_input)
-            }))
-        };
-    }
-
     // Pauses at `$at` when the output is full. Nothing of that symbol or
     // block may have been written yet. If bits came from past the end of the
     // input, it is truncated instead.
@@ -1190,7 +1177,11 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                 if !more_input && c.in_pos == input.len() {
                     return Err(Truncated);
                 }
-                pause_stored!(left - n, is_final_block, c.out_pos < out_len);
+                // Pause inside the block, with `left - n` bytes of it to go.
+                return Ok(Status::Full(Resume {
+                    stored_left: (left - n) as u16,
+                    ..Resume::new(c, Some(is_final_block), c.out_pos < out_len)
+                }));
             }
             if is_final_block {
                 break;

@@ -102,6 +102,15 @@ impl<const WRITE: bool> Core<WRITE> {
         }
     }
 
+    /// Writes the public type `name` that wraps this for `Debug`.
+    fn debug(&self, name: &str, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct(name)
+            .field("format", &self.format)
+            .field("total_in", &self.total_in)
+            .field("total_out", &self.total_out)
+            .finish_non_exhaustive()
+    }
+
     /// Starts a new stream, keeping the tables.
     fn restart(&mut self) {
         self.stage = Stage::Header;
@@ -153,6 +162,17 @@ impl<const WRITE: bool> Core<WRITE> {
         }
     }
 
+    /// The output length to pass `decode::run`: the buffer's, which it uses
+    /// anyway with `WRITE`. Without, a limit well short of overflowing the
+    /// position (on 32-bit), where it pauses.
+    const fn out_len(buf: &[u8]) -> usize {
+        if WRITE {
+            buf.len()
+        } else {
+            usize::MAX / 2
+        }
+    }
+
     /// Whether [`run_whole`](Self::run_whole) applies: nothing of this
     /// stream read yet, or the last one is done.
     fn can_run_whole(&self) -> bool {
@@ -179,7 +199,7 @@ impl<const WRITE: bool> Core<WRITE> {
         // The header, body and trailer in turn, each from all of the input
         // left, so that an error is found where zlib finds it.
         let start = body_start(format, input)?;
-        let out_len = if WRITE { buf.len() } else { usize::MAX / 2 };
+        let out_len = Self::out_len(buf);
         let r = decode::run::<false, WRITE>(
             &mut self.tables,
             &input[start..],
@@ -284,8 +304,7 @@ impl<const WRITE: bool> Core<WRITE> {
             // Matches reach back at most `WINDOW`.
             self.pos = self.pos.min(WINDOW);
         }
-        // Without writes, pause well before the position overflows (32-bit).
-        let out_len = if WRITE { buf.len() } else { usize::MAX / 2 };
+        let out_len = Self::out_len(buf);
         let fresh = core::mem::replace(&mut self.fresh, false);
 
         if self.carry_len == 0 {
@@ -294,8 +313,7 @@ impl<const WRITE: bool> Core<WRITE> {
                 // All input is here: the one-shot loop.
                 decode::run::<false, WRITE>(&mut self.tables, rest, buf, out_len, None, false)?
             } else {
-                self.resume.set_in_pos(0);
-                self.resume.set_out_pos(self.pos);
+                self.resume.rebase(self.pos);
                 let resume = &self.resume;
                 decode::run::<true, WRITE>(
                     &mut self.tables,
@@ -342,8 +360,7 @@ impl<const WRITE: bool> Core<WRITE> {
         self.carry[old..old + take].copy_from_slice(&rest[..take]);
         self.carry_len = old + take;
         let more = !end || take < rest.len();
-        self.resume.set_in_pos(0);
-        self.resume.set_out_pos(self.pos);
+        self.resume.rebase(self.pos);
         let r = decode::run::<true, WRITE>(
             &mut self.tables,
             &self.carry[..self.carry_len],
@@ -358,14 +375,14 @@ impl<const WRITE: bool> Core<WRITE> {
                 self.unload_carry(consumed, old, ip);
                 Step::Done
             }
-            Status::Full(mut r) => {
+            Status::Full(r) => {
                 self.output(buf, r.out_pos());
                 let pos = r.in_pos();
                 if r.needs_input() && pos < old {
                     // Still short of input: keep all of it.
                     self.drain_carry(pos);
                     *ip += take;
-                    r.set_in_pos(0);
+                    // The next call rebases it on the carry.
                     self.resume = r;
                     if take == 0 {
                         if self.carry_len == CARRY_LEN {
@@ -455,6 +472,35 @@ fn need_input(end: bool) -> Result<Stop, Error> {
     } else {
         Ok(Stop::NeedInput)
     }
+}
+
+/// The methods that [`Decoder`] and [`Scanner`] share, over their `core`,
+/// with the docs that differ.
+macro_rules! core_methods {
+    (format: $format:literal, reset: $reset:literal, total_out: $total_out:literal,) => {
+        #[doc = $format]
+        #[must_use]
+        pub const fn format(&self) -> Format {
+            self.core.format
+        }
+
+        #[doc = $reset]
+        pub fn reset(&mut self) {
+            self.core.restart();
+        }
+
+        /// Input bytes used by the current (or just finished) stream.
+        #[must_use]
+        pub fn total_in(&self) -> u64 {
+            self.core.total_in
+        }
+
+        #[doc = $total_out]
+        #[must_use]
+        pub fn total_out(&self) -> u64 {
+            self.core.total_out
+        }
+    };
 }
 
 /// A DEFLATE, zlib or gzip decoder that writes into a buffer you own.
@@ -549,11 +595,7 @@ pub struct Decoder {
 
 impl core::fmt::Debug for Decoder {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Decoder")
-            .field("format", &self.core.format)
-            .field("total_in", &self.core.total_in)
-            .field("total_out", &self.core.total_out)
-            .finish_non_exhaustive()
+        self.core.debug("Decoder", f)
     }
 }
 
@@ -588,27 +630,10 @@ impl Decoder {
         }
     }
 
-    /// The format this decoder reads.
-    #[must_use]
-    pub const fn format(&self) -> Format {
-        self.core.format
-    }
-
-    /// Abandons the current stream. Not needed after one is done.
-    pub fn reset(&mut self) {
-        self.core.restart();
-    }
-
-    /// Input bytes used by the current (or just finished) stream.
-    #[must_use]
-    pub fn total_in(&self) -> u64 {
-        self.core.total_in
-    }
-
-    /// Bytes decompressed by the current (or just finished) stream.
-    #[must_use]
-    pub fn total_out(&self) -> u64 {
-        self.core.total_out
+    core_methods! {
+        format: "The format this decoder reads.",
+        reset: "Abandons the current stream. Not needed after one is done.",
+        total_out: "Bytes decompressed by the current (or just finished) stream.",
     }
 
     /// Decompresses from `input` into `buf`.
@@ -626,27 +651,22 @@ impl Decoder {
         end_of_input: bool,
     ) -> Result<Progress<'b>, Error> {
         let core = &mut self.core;
-        if end_of_input && core.can_run_whole() {
-            let r = core.run_whole(input, buf)?;
-            let buf: &'b [u8] = buf;
-            return Ok(Progress {
-                consumed: r.consumed,
-                output: &buf[..core.pos],
-                done: r.done,
-                full: core.stage == Stage::Body && core.pos == buf.len(),
-            });
-        }
-        if core.stage == Stage::Done {
-            core.restart();
-        }
-        if core.pos > buf.len() {
-            return Err(Error::BufferFull);
-        }
-        let r = core.run(input, buf, end_of_input)?;
-        if r.full && r.consumed == 0 && r.start == core.pos {
-            // No progress without room: don't let a loop spin.
-            return Err(Error::BufferFull);
-        }
+        let r = if end_of_input && core.can_run_whole() {
+            core.run_whole(input, buf)?
+        } else {
+            if core.stage == Stage::Done {
+                core.restart();
+            }
+            if core.pos > buf.len() {
+                return Err(Error::BufferFull);
+            }
+            let r = core.run(input, buf, end_of_input)?;
+            if r.full && r.consumed == 0 && r.start == core.pos {
+                // No progress without room: don't let a loop spin.
+                return Err(Error::BufferFull);
+            }
+            r
+        };
         let buf: &'b [u8] = buf;
         Ok(Progress {
             consumed: r.consumed,
@@ -701,11 +721,7 @@ pub struct Scanner {
 
 impl core::fmt::Debug for Scanner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Scanner")
-            .field("format", &self.core.format)
-            .field("total_in", &self.core.total_in)
-            .field("total_out", &self.core.total_out)
-            .finish_non_exhaustive()
+        self.core.debug("Scanner", f)
     }
 }
 
@@ -728,27 +744,10 @@ impl Scanner {
         }
     }
 
-    /// The format this scanner reads.
-    #[must_use]
-    pub const fn format(&self) -> Format {
-        self.core.format
-    }
-
-    /// Abandons the current stream.
-    pub fn reset(&mut self) {
-        self.core.restart();
-    }
-
-    /// Input bytes used by the current (or just finished) stream.
-    #[must_use]
-    pub fn total_in(&self) -> u64 {
-        self.core.total_in
-    }
-
-    /// Output bytes of the current (or just finished) stream so far.
-    #[must_use]
-    pub fn total_out(&self) -> u64 {
-        self.core.total_out
+    core_methods! {
+        format: "The format this scanner reads.",
+        reset: "Abandons the current stream.",
+        total_out: "Output bytes of the current (or just finished) stream so far.",
     }
 
     /// Decodes `input` without writing the output.
