@@ -57,7 +57,7 @@ missing_debug_implementations = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
 unreachable_pub = "warn"
 # `sirocco_no_bmi2` is set by scripts/bench.sh to time the decoder without
-# BMI2; `docsrs` by docs.rs.
+# BMI2, and by CI to test it; `docsrs` by docs.rs.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(sirocco_no_bmi2)", "cfg(docsrs)"] }
 unused_qualifications = "warn"
 

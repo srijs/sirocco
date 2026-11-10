@@ -1,15 +1,17 @@
 //! Differential tests for streaming: fed in pieces, through a buffer smaller
 //! than the output, sirocco must agree with zlib-rs's one-shot decoder.
 
+mod common;
+
 use compare::{
-    assert_agree, reference_compress, sirocco_scan, sirocco_stream as stream, Format, Outcome,
-    ReferenceDecompressor,
+    assert_agree, reference_compress, reference_decompress, sirocco_scan, sirocco_stream as stream,
+    Format, Outcome,
 };
 use proptest::prelude::*;
 
 fn check_same(format: Format, input: &[u8], ins: &[usize], buf_len: usize) {
     let ours = stream(format, input, ins, buf_len);
-    let theirs = ReferenceDecompressor::new().decompress(format, input, room(input));
+    let theirs = reference_decompress(format, input, room(input));
     let what = format!(
         "{format:?}, {} input bytes, ins {ins:?}, buffer {buf_len}",
         input.len()
@@ -66,19 +68,6 @@ fn truncated_streams_are_errors() {
     }
 }
 
-fn mixed_data() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(
-        prop_oneof![
-            prop::collection::vec(any::<u8>(), 0..64),
-            (any::<u8>(), 1usize..600).prop_map(|(b, n)| vec![b; n]),
-            (prop::collection::vec(any::<u8>(), 1..9), 1usize..80).prop_map(|(p, n)| p.repeat(n)),
-            prop::collection::vec(prop::sample::select(b"abcde".to_vec()), 0..300),
-        ],
-        0..120,
-    )
-    .prop_map(|chunks| chunks.concat())
-}
-
 fn sizes(max: usize) -> impl Strategy<Value = Vec<usize>> {
     prop::collection::vec(prop_oneof![1usize..16, 1..max], 1..8)
 }
@@ -88,7 +77,7 @@ proptest! {
 
     #[test]
     fn chunked_matches_zlib(
-        data in mixed_data(),
+        data in common::mixed_data(120, false),
         level in 0i32..=12,
         f in 0usize..3,
         ins in sizes(5000),
@@ -99,7 +88,7 @@ proptest! {
 
     #[test]
     fn corrupted_chunked_matches_zlib(
-        data in mixed_data(),
+        data in common::mixed_data(120, false),
         level in 0i32..=12,
         f in 0usize..3,
         flips in prop::collection::vec((any::<prop::sample::Index>(), 0u8..8), 1..4),
@@ -108,10 +97,7 @@ proptest! {
     ) {
         let format = Format::ALL[f];
         let mut c = reference_compress(format, level, &data);
-        for (i, bit) in flips {
-            let i = i.index(c.len());
-            c[i] ^= 1 << bit;
-        }
+        common::flip_bits(&mut c, flips);
         check_same(format, &c, &ins, BUF_LENS[buf]);
     }
 
@@ -119,7 +105,7 @@ proptest! {
     /// checksums it can't check.
     #[test]
     fn corrupted_scans_match_zlib(
-        data in mixed_data(),
+        data in common::mixed_data(120, false),
         level in 0i32..=12,
         f in 0usize..3,
         flips in prop::collection::vec((any::<prop::sample::Index>(), 0u8..8), 0..4),
@@ -127,12 +113,9 @@ proptest! {
     ) {
         let format = Format::ALL[f];
         let mut c = reference_compress(format, level, &data);
-        for (i, bit) in flips {
-            let i = i.index(c.len());
-            c[i] ^= 1 << bit;
-        }
+        common::flip_bits(&mut c, flips);
         let ours = sirocco_scan(format, &c, &ins);
-        match ReferenceDecompressor::new().decompress(format, &c, room(&c)) {
+        match reference_decompress(format, &c, room(&c)) {
             Outcome::Ok(used, out) => prop_assert_eq!(ours, Ok((used, out.len() as u64))),
             // Maybe only the checksum is wrong.
             Outcome::BadData if format != Format::Deflate => {}

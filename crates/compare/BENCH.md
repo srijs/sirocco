@@ -26,7 +26,7 @@ before it is timed.
 | Format | raw DEFLATE; zlib for small text (as git), gzip for MB-scale text |
 | Real corpus | each file whole, at `--levels` (default 6) |
 | Git packs | every zlib stream of a pack, in pack order, plus the same streams split by size class |
-| Mode | `oneshot` (`Decompressor::decompress_into`), `stream` (`StreamDecompressor`, 32 KiB input and 64 KiB output pieces), `measure` (`StreamMeasurer`, 32 KiB pieces, as gitoxide's pack indexing) |
+| Mode | `oneshot` (`inflate::Decoder`, one call), `stream` (`inflate::Decoder`, 32 KiB input and 64 KiB output pieces), `measure` (`inflate::Scanner`, 32 KiB pieces, as gitoxide's pack indexing) |
 | Decompressors | `sirocco` (working tree), `base` (with `--base`), `libdeflate` (one-shot only), `zlib-rs` (its `Inflate`, reset between streams; in `measure` it inflates into a scratch buffer) |
 | BMI2 | `on` and `off` on x86-64 (`--bmi2`) |
 
@@ -131,7 +131,7 @@ For example, only small outputs in one-shot mode against base:
 The suite also runs without the script, for one build and no base:
 `cargo run -p compare --release --bin bench`.
 
-The base must have `StreamMeasurer` (sirocco after PR #29). To add a case,
+The base must have the `inflate` module (sirocco 0.2 and later). To add a case,
 extend `suite/cases.rs`; to add a decompressor, implement
 `suite::Inflater` and add it in `suite::main`.
 
@@ -153,9 +153,10 @@ interleaved rounds, rotating which compressor goes first; a compressor's time
 is its best round. `size vs zlib` compares total compressed size (negative
 means smaller), `speed vs zlib` total time.
 
-sirocco's levels are calibrated against zlib's: each should compress at least
-as well as zlib's same level, on Silesia and on server logs, in as little
-time as can be. After changing the compressor, check that it still does:
+sirocco's levels are calibrated against zlib's: each should compress about
+as well as zlib's same level (within 1%) on Silesia, Canterbury and server
+logs, in as little time as can be. After changing the compressor, check that
+it still does:
 
 ```sh
 cargo run -p compare --release --bin compress -- --rounds 1 --impls sirocco,zlib \

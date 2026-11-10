@@ -2,17 +2,18 @@
 //! on valid streams (output and consumed input) and on corrupt ones (which
 //! error is returned).
 
+mod common;
+
 use compare::{
-    assert_agree, reference_compress, sirocco_decompress, Format, Outcome, ReferenceDecompressor,
+    assert_agree, reference_compress, reference_decompress, sirocco_decompress, Format, Outcome,
     SiroccoDecoders,
 };
 use proptest::prelude::*;
 
 fn check_same(format: Format, input: &[u8], out_len: usize) -> Outcome {
     let mut ours = SiroccoDecoders::new();
-    let mut theirs = ReferenceDecompressor::new();
     let a = sirocco_decompress(&mut ours, format, input, out_len);
-    let b = theirs.decompress(format, input, out_len);
+    let b = reference_decompress(format, input, out_len);
     let what = format!("{format:?}, {} input bytes, out_len {out_len}", input.len());
     assert_agree(&a, &b, &what);
     a
@@ -105,21 +106,6 @@ fn empty_input() {
     }
 }
 
-/// Data with a mix of literals, short-offset matches and long runs, so that
-/// all of the match copy paths get used.
-fn mixed_data() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(
-        prop_oneof![
-            prop::collection::vec(any::<u8>(), 0..64),
-            (any::<u8>(), 1usize..600).prop_map(|(b, n)| vec![b; n]),
-            (prop::collection::vec(any::<u8>(), 1..9), 1usize..80).prop_map(|(p, n)| p.repeat(n)),
-            prop::collection::vec(prop::sample::select(b"abcde".to_vec()), 0..300),
-        ],
-        0..40,
-    )
-    .prop_map(|chunks| chunks.concat())
-}
-
 /// Literal-heavy data over a skewed alphabet, whose short literal codewords
 /// get decoded two at a time.
 fn skewed_literals() -> impl Strategy<Value = Vec<u8>> {
@@ -161,7 +147,7 @@ proptest! {
     /// that the tail fastloop has to stop before or copy without overrun.
     #[test]
     fn output_end_near_matches_zlib(
-        data in mixed_data(),
+        data in common::mixed_data(40, false),
         level in 0i32..=12,
         f in 0usize..3,
         out_delta in -320isize..4,
@@ -179,7 +165,7 @@ proptest! {
     }
 
     #[test]
-    fn round_trips(data in mixed_data(), level in 0i32..=12, f in 0usize..3) {
+    fn round_trips(data in common::mixed_data(40, false), level in 0i32..=12, f in 0usize..3) {
         let format = Format::ALL[f];
         let c = reference_compress(format, level, &data);
         let mut d = SiroccoDecoders::new();
@@ -193,7 +179,7 @@ proptest! {
     /// outcome, which exercises error paths far more than random bytes do.
     #[test]
     fn corrupted_streams_match_zlib(
-        data in mixed_data(),
+        data in common::mixed_data(40, false),
         level in 0i32..=12,
         f in 0usize..3,
         flips in prop::collection::vec((any::<prop::sample::Index>(), 0u8..8), 1..4),
@@ -201,10 +187,7 @@ proptest! {
     ) {
         let format = Format::ALL[f];
         let mut c = reference_compress(format, level, &data);
-        for (i, bit) in flips {
-            let i = i.index(c.len());
-            c[i] ^= 1 << bit;
-        }
+        common::flip_bits(&mut c, flips);
         check_same(format, &c, data.len() + extra_out);
     }
 
@@ -221,7 +204,7 @@ proptest! {
     /// every member of a multi-member gzip file.
     #[test]
     fn vec_decompress_round_trips(
-        parts in prop::collection::vec(mixed_data(), 1..4),
+        parts in prop::collection::vec(common::mixed_data(40, false), 1..4),
         level in 0i32..=12,
         f in 0usize..3,
     ) {
@@ -247,7 +230,7 @@ proptest! {
 #[test]
 fn corrupted_fixed_streams_match_zlib() {
     let mut rng = compare::Rng(0x9e37_79b9_7f4a_7c15);
-    let (mut ours, mut theirs) = (SiroccoDecoders::new(), ReferenceDecompressor::new());
+    let mut ours = SiroccoDecoders::new();
     for _ in 0..5_000 {
         let len = 1 + (rng.next() % 3000) as usize;
         let data: Vec<u8> = (0..len)
@@ -270,7 +253,7 @@ fn corrupted_fixed_streams_match_zlib() {
             let (out_len, f) = (len + 16, Format::Deflate);
             assert_agree(
                 &sirocco_decompress(&mut ours, f, &c, out_len),
-                &theirs.decompress(f, &c, out_len),
+                &reference_decompress(f, &c, out_len),
                 &format!("{} input bytes", c.len()),
             );
         }

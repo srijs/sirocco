@@ -185,9 +185,10 @@ libdeflate's levels compress more than zlib's, so its rows are not like for
 like. At the same settings, sirocco's lazy parsing is a little faster than
 libdeflate's (sirocco's level 6 searches as deep as libdeflate's level 5,
 and runs 3% faster for 0.1% more output, from its smaller blocks), while
-at the fast end, with libdeflate's level 1 settings, sirocco is 8% slower. Data built from a few short words in random order, where deep
-searches for short matches pay, is a weak spot sirocco shares with
-libdeflate: zlib's 3-byte hash chains do better there.
+at the fast end, with libdeflate's level 1 settings, sirocco is 8% slower.
+Data built from a few short words in random order, where deep searches for
+short matches pay, is a weak spot sirocco shares with libdeflate: zlib's
+3-byte hash chains do better there.
 
 ## Relationship to libdeflate
 
@@ -224,12 +225,13 @@ Much of sirocco is its own work, though:
   sirocco's `deflate::Encoder` takes input in pieces, writes output into
   buffers of any size (resuming mid-block), and has zlib's sync and full
   flushes, with tables you can provide yourself.
-- **zlib's levels.** Each level is tuned to compress at least as well as
+- **zlib's levels.** Each level is tuned to compress about as well as
   zlib's same level in as little time as can be, with a few ideas from
   elsewhere at the fast end: lazy matching on a hash table of one-entry
   buckets, zlib's limit on inserting the positions inside long matches, and
-  lz4-style skipping through incompressible data. Small inputs given whole get smaller hash
-  tables, so that clearing them doesn't cost more than compressing.
+  lz4-style skipping through incompressible data. Small inputs given whole
+  get smaller hash tables, so that clearing them doesn't cost more than
+  compressing.
 - **An idiomatic Rust API**, `no_std` support, and a differential test,
   fuzzing and benchmark suite against zlib, libdeflate, zlib-rs and
   miniz_oxide.

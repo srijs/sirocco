@@ -34,14 +34,6 @@ proptest = "1"
 name = "checksums"
 harness = false
 
-[[bench]]
-name = "decompress"
-harness = false
-
-[[bench]]
-name = "deflate"
-harness = false
-
 [lib]
 bench = false
 

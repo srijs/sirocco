@@ -4,7 +4,7 @@
 //! formats and checks they agree on the outcome, the consumed input and the
 //! output.
 
-use compare::{assert_agree, sirocco_decompress, Format, ReferenceDecompressor, SiroccoDecoders};
+use compare::{assert_agree, reference_decompress, sirocco_decompress, Format, SiroccoDecoders};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -15,11 +15,10 @@ fuzz_target!(|data: &[u8]| {
         _ => return,
     };
     let mut ours = SiroccoDecoders::new();
-    let mut theirs = ReferenceDecompressor::new();
     for format in Format::ALL {
         assert_agree(
             &sirocco_decompress(&mut ours, format, input, out_len),
-            &theirs.decompress(format, input, out_len),
+            &reference_decompress(format, input, out_len),
             &format!("{format:?}"),
         );
     }

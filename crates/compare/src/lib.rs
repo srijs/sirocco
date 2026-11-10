@@ -32,6 +32,16 @@ impl Rng {
         self.0 ^= self.0 << 17;
         self.0
     }
+
+    /// A number in `0..n`.
+    pub fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+
+    /// A number in `r`.
+    pub fn range(&mut self, r: std::ops::Range<usize>) -> usize {
+        r.start + self.below(r.end - r.start)
+    }
 }
 
 pub(crate) const WORDS: &[&str] = &[
@@ -126,7 +136,8 @@ pub fn real_corpus() -> Vec<Sample> {
         .collect()
 }
 
-fn corpus_dir() -> Option<PathBuf> {
+/// The real-corpus directory, if there is one (see [`corpus`]).
+pub fn corpus_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("SIROCCO_CORPUS_DIR") {
         return Some(dir.into());
     }
@@ -134,7 +145,9 @@ fn corpus_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Appends every file under `dir` to `out`, recursively and skipping hidden
+/// files and directories, in directory order (sort `out` for a stable one).
+pub fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
         let p = e.unwrap().path();
         let hidden = p.file_name().unwrap().to_string_lossy().starts_with('.');
@@ -147,111 +160,6 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(p);
         }
     }
-}
-
-/// A DEFLATE decoder to compare against.
-#[derive(Debug)]
-pub struct Codec {
-    pub name: &'static str,
-    /// Decompresses raw DEFLATE into all of `out`, panicking on malformed
-    /// input or if the output is not exactly `out.len()` bytes. Taking the
-    /// buffer keeps allocation out of decompression timings.
-    pub decompress_into: fn(data: &[u8], out: &mut [u8]),
-}
-
-impl Codec {
-    /// Decompresses to exactly `size` bytes.
-    pub fn decompress(&self, data: &[u8], size: usize) -> Vec<u8> {
-        let mut out = vec![0; size];
-        (self.decompress_into)(data, &mut out);
-        out
-    }
-}
-
-/// The decoders to compare. The first is the reference the others are
-/// judged against.
-///
-/// zenflate is AGPL-3.0 (or commercial), so it is only built with the opt-in
-/// `zenflate` feature.
-pub fn codecs() -> Vec<Codec> {
-    vec![
-        Codec {
-            name: "libdeflate",
-            decompress_into: libdeflate_decompress_into,
-        },
-        Codec {
-            name: "sirocco",
-            decompress_into: sirocco_decompress_into,
-        },
-        Codec {
-            name: "zlib-rs",
-            decompress_into: zlib_rs_decompress_into,
-        },
-        Codec {
-            name: "miniz_oxide",
-            decompress_into: miniz_oxide_decompress_into,
-        },
-        #[cfg(feature = "zenflate")]
-        Codec {
-            name: "zenflate",
-            decompress_into: zenflate_decompress_into,
-        },
-    ]
-}
-
-pub fn libdeflate_decompress_into(data: &[u8], out: &mut [u8]) {
-    let n = libdeflater::Decompressor::new()
-        .deflate_decompress(data, out)
-        .unwrap();
-    assert_eq!(n, out.len(), "libdeflate decompressed to the wrong size");
-}
-
-pub fn sirocco_decompress_into(data: &[u8], out: &mut [u8]) {
-    let len = out.len();
-    let p = sirocco::inflate::Decoder::new(sirocco::Format::Deflate)
-        .decompress(data, out, true)
-        .unwrap();
-    assert!(p.done, "sirocco didn't finish");
-    assert_eq!(
-        p.output.len(),
-        len,
-        "sirocco decompressed to the wrong size"
-    );
-}
-
-pub fn zlib_rs_decompress_into(data: &[u8], out: &mut [u8]) {
-    let config = zlib_rs::InflateConfig { window_bits: -15 };
-    let size = out.len();
-    let (decompressed, rc) = zlib_rs::decompress_slice(out, data, config);
-    assert_eq!(rc, zlib_rs::ReturnCode::Ok, "zlib-rs decompress");
-    assert_eq!(
-        decompressed.len(),
-        size,
-        "zlib-rs decompressed to the wrong size"
-    );
-}
-
-pub fn miniz_oxide_decompress_into(data: &[u8], out: &mut [u8]) {
-    use miniz_oxide::inflate::core::{decompress, inflate_flags, DecompressorOxide};
-    use miniz_oxide::inflate::TINFLStatus;
-
-    let mut d = DecompressorOxide::new();
-    let flags = inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
-    let (status, _, n) = decompress(&mut d, data, out, 0, flags);
-    assert_eq!(status, TINFLStatus::Done, "miniz_oxide decompress");
-    assert_eq!(n, out.len(), "miniz_oxide decompressed to the wrong size");
-}
-
-#[cfg(feature = "zenflate")]
-pub fn zenflate_decompress_into(data: &[u8], out: &mut [u8]) {
-    let r = zenflate::Decompressor::new()
-        .deflate_decompress(data, out, zenflate::Unstoppable)
-        .unwrap();
-    assert_eq!(
-        r.output_written,
-        out.len(),
-        "zenflate decompressed to the wrong size"
-    );
 }
 
 fn human(n: usize) -> String {
@@ -272,6 +180,16 @@ pub enum Format {
 
 impl Format {
     pub const ALL: [Format; 3] = [Format::Deflate, Format::Zlib, Format::Gzip];
+
+    /// The format's index in [`Format::ALL`].
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Format::Deflate => 0,
+            Format::Zlib => 1,
+            Format::Gzip => 2,
+        }
+    }
 
     /// The same format in sirocco's terms.
     #[must_use]
@@ -342,44 +260,34 @@ pub fn assert_agree(ours: &Outcome, theirs: &Outcome, what: &dyn std::fmt::Displ
     );
 }
 
-/// The reference decompressor: zlib-rs, since sirocco accepts the streams
-/// zlib accepts, and only those.
-#[derive(Debug, Default)]
-pub struct ReferenceDecompressor;
-
-impl ReferenceDecompressor {
-    #[must_use]
-    pub fn new() -> Self {
-        ReferenceDecompressor
-    }
-
-    pub fn decompress(&mut self, format: Format, input: &[u8], out_len: usize) -> Outcome {
-        let mut z = match format {
-            Format::Deflate => zlib_rs::Inflate::new(false, 15),
-            Format::Zlib => zlib_rs::Inflate::new(true, 15),
-            Format::Gzip => zlib_rs::Inflate::new(true, 16 + 15),
-        };
-        let mut out = vec![0u8; out_len];
-        match z.decompress(input, &mut out, zlib_rs::InflateFlush::Finish) {
-            Ok(zlib_rs::Status::StreamEnd) => {
-                out.truncate(z.total_out() as usize);
-                Outcome::Ok(z.total_in() as usize, out)
-            }
-            // zlib stops when it runs out of input or of room. Out of
-            // both, it is out of room if one more byte of it lets the stream
-            // go on.
-            Ok(_) if z.total_out() as usize == out_len => {
-                let rest = &input[z.total_in() as usize..];
-                match z.decompress(rest, &mut [0], zlib_rs::InflateFlush::Finish) {
-                    Ok(zlib_rs::Status::BufError) if z.total_out() as usize == out_len => {
-                        Outcome::Truncated
-                    }
-                    _ => Outcome::InsufficientSpace,
-                }
-            }
-            Ok(_) => Outcome::Truncated,
-            Err(_) => Outcome::BadData,
+/// Decompresses with the reference decompressor, zlib-rs, since sirocco
+/// accepts the streams zlib accepts, and only those.
+pub fn reference_decompress(format: Format, input: &[u8], out_len: usize) -> Outcome {
+    let mut z = match format {
+        Format::Deflate => zlib_rs::Inflate::new(false, 15),
+        Format::Zlib => zlib_rs::Inflate::new(true, 15),
+        Format::Gzip => zlib_rs::Inflate::new(true, 16 + 15),
+    };
+    let mut out = vec![0u8; out_len];
+    match z.decompress(input, &mut out, zlib_rs::InflateFlush::Finish) {
+        Ok(zlib_rs::Status::StreamEnd) => {
+            out.truncate(z.total_out() as usize);
+            Outcome::Ok(z.total_in() as usize, out)
         }
+        // zlib stops when it runs out of input or of room. Out of
+        // both, it is out of room if one more byte of it lets the stream
+        // go on.
+        Ok(_) if z.total_out() as usize == out_len => {
+            let rest = &input[z.total_in() as usize..];
+            match z.decompress(rest, &mut [0], zlib_rs::InflateFlush::Finish) {
+                Ok(zlib_rs::Status::BufError) if z.total_out() as usize == out_len => {
+                    Outcome::Truncated
+                }
+                _ => Outcome::InsufficientSpace,
+            }
+        }
+        Ok(_) => Outcome::Truncated,
+        Err(_) => Outcome::BadData,
     }
 }
 
@@ -395,8 +303,7 @@ impl SiroccoDecoders {
 
     /// The decoder for `format`.
     pub fn get(&mut self, format: Format) -> &mut sirocco::inflate::Decoder {
-        let i = Format::ALL.iter().position(|&f| f == format).unwrap();
-        &mut self.0[i]
+        &mut self.0[format.index()]
     }
 }
 

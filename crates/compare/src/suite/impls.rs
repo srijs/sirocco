@@ -63,7 +63,7 @@ pub trait Inflater {
 /// The suite's runner (see `scripts/bench.sh`) uses this on a copy of a base
 /// revision whose package is renamed `sirocco_base`, so the base and the
 /// working tree are timed in one binary. The base needs the `inflate`
-/// module's API; [`sirocco_v01_inflater`] covers bases from before it.
+/// module's API.
 #[macro_export]
 macro_rules! sirocco_inflater {
     ($ty:ident, $name:literal, $krate:ident) => {
@@ -92,14 +92,6 @@ macro_rules! sirocco_inflater {
                     buf: vec![0; 256 << 10],
                 }
             }
-
-            fn index(format: $crate::Format) -> usize {
-                match format {
-                    $crate::Format::Deflate => 0,
-                    $crate::Format::Zlib => 1,
-                    $crate::Format::Gzip => 2,
-                }
-            }
         }
 
         impl Default for $ty {
@@ -124,7 +116,7 @@ macro_rules! sirocco_inflater {
                 out: &mut [u8],
             ) -> usize {
                 use $crate::suite::{Mode, IN_CHUNK, OUT_CHUNK};
-                let f = Self::index(case.format);
+                let f = case.format.index();
                 let mut total = 0;
                 match mode {
                     Mode::OneShot => {
@@ -182,134 +174,6 @@ macro_rules! sirocco_inflater {
                                     break;
                                 }
                                 ip = end;
-                            }
-                            total += m.total_out() as usize;
-                        }
-                    }
-                }
-                total
-            }
-        }
-    };
-}
-
-/// [`sirocco_inflater`] for bases with sirocco 0.1's API (after PR #29).
-/// `scripts/bench.sh` picks it for bases without `src/inflate`.
-#[macro_export]
-macro_rules! sirocco_v01_inflater {
-    ($ty:ident, $name:literal, $krate:ident) => {
-        /// sirocco as an [`Inflater`]($crate::suite::Inflater).
-        #[derive(Debug)]
-        pub struct $ty {
-            one: $krate::Decompressor,
-            stream: [$krate::StreamDecompressor; 3],
-            measure: [$krate::StreamMeasurer; 3],
-        }
-
-        impl $ty {
-            const FORMATS: [$krate::Format; 3] = [
-                $krate::Format::Deflate,
-                $krate::Format::Zlib,
-                $krate::Format::Gzip,
-            ];
-
-            #[must_use]
-            pub fn new() -> Self {
-                $ty {
-                    one: $krate::Decompressor::new($krate::Format::Deflate),
-                    stream: Self::FORMATS.map($krate::StreamDecompressor::new),
-                    measure: Self::FORMATS.map($krate::StreamMeasurer::new),
-                }
-            }
-
-            fn index(format: $crate::Format) -> usize {
-                match format {
-                    $crate::Format::Deflate => 0,
-                    $crate::Format::Zlib => 1,
-                    $crate::Format::Gzip => 2,
-                }
-            }
-        }
-
-        impl Default for $ty {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-
-        impl $crate::suite::Inflater for $ty {
-            fn name(&self) -> &'static str {
-                $name
-            }
-
-            fn supports(&self, _mode: $crate::suite::Mode) -> bool {
-                true
-            }
-
-            fn run(
-                &mut self,
-                mode: $crate::suite::Mode,
-                case: &$crate::suite::Case,
-                out: &mut [u8],
-            ) -> usize {
-                use $crate::suite::{Mode, IN_CHUNK, OUT_CHUNK};
-                let f = Self::index(case.format);
-                let mut total = 0;
-                match mode {
-                    Mode::OneShot => {
-                        self.one.set_format(Self::FORMATS[f]);
-                        for s in &case.streams {
-                            let r = self
-                                .one
-                                .decompress_into(
-                                    &case.input[s.input.clone()],
-                                    &mut out[s.output.clone()],
-                                )
-                                .expect("sirocco one-shot");
-                            total += r.written;
-                        }
-                    }
-                    Mode::Stream => {
-                        let d = &mut self.stream[f];
-                        for s in &case.streams {
-                            d.reset();
-                            let input = &case.input[s.input.clone()];
-                            let out = &mut out[s.output.clone()];
-                            let (mut ip, mut op) = (0, 0);
-                            loop {
-                                let end = (ip + IN_CHUNK).min(input.len());
-                                let oend = (op + OUT_CHUNK).min(out.len());
-                                let p = d
-                                    .decompress(
-                                        &input[ip..end],
-                                        &mut out[op..oend],
-                                        end == input.len(),
-                                    )
-                                    .expect("sirocco stream");
-                                ip += p.consumed;
-                                op += p.written;
-                                if p.status == $krate::StreamStatus::Done {
-                                    break;
-                                }
-                            }
-                            total += op;
-                        }
-                    }
-                    Mode::Measure => {
-                        let m = &mut self.measure[f];
-                        for s in &case.streams {
-                            m.reset();
-                            let input = &case.input[s.input.clone()];
-                            let mut ip = 0;
-                            loop {
-                                let end = (ip + IN_CHUNK).min(input.len());
-                                let p = m
-                                    .measure(&input[ip..end], end == input.len())
-                                    .expect("sirocco measure");
-                                ip += p.consumed;
-                                if p.done {
-                                    break;
-                                }
                             }
                             total += m.total_out() as usize;
                         }
@@ -394,18 +258,13 @@ impl Default for ZlibRs {
 
 impl ZlibRs {
     fn reset(&mut self, format: Format) -> &mut zlib_rs::Inflate {
-        let (i, header) = match format {
-            Format::Deflate => (0, false),
-            Format::Zlib => (1, true),
-            Format::Gzip => (2, true),
-        };
-        let z = &mut self.z[i];
+        let z = &mut self.z[format.index()];
         if format == Format::Gzip {
             // `reset` only knows zlib and raw; gzip needs a fresh state,
             // which allocates. The suite only has MB-scale gzip cases.
             *z = zlib_rs::Inflate::new(true, 16 + 15);
         } else {
-            z.reset(header);
+            z.reset(format == Format::Zlib);
         }
         z
     }

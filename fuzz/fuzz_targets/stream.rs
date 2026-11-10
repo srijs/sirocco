@@ -3,7 +3,7 @@
 //! Feeds arbitrary bytes to sirocco's decoder in pieces, through a buffer
 //! smaller than the output can be, and checks it agrees with zlib-rs.
 
-use compare::{assert_agree, sirocco_stream, Format, ReferenceDecompressor};
+use compare::{assert_agree, reference_decompress, sirocco_stream, Format};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -16,11 +16,10 @@ fuzz_target!(|data: &[u8]| {
         }
         _ => return,
     };
-    let mut theirs = ReferenceDecompressor::new();
     for format in Format::ALL {
         assert_agree(
             &sirocco_stream(format, input, &ins, buf_len),
-            &theirs.decompress(format, input, 1 << 22),
+            &reference_decompress(format, input, 1 << 22),
             &format!("{format:?}"),
         );
     }

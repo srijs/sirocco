@@ -87,31 +87,13 @@ if [ -n "$base" ]; then
   # `tar` keeps the commit's mtimes, which can look older than the last
   # build of another base; touch them so cargo rebuilds.
   find "$bench/base" -type f -exec touch {} +
-  # Rename the package, drop its workspace members (not copied), and let
-  # `--cfg sirocco_no_bmi2` switch BMI2 off in bases older than that cfg.
+  # Rename the package and drop its workspace members (not copied).
   sed -i.orig -e 's/^name = "sirocco"$/name = "sirocco_base"/' \
     -e '/^members = /d' "$bench/base/Cargo.toml"
-  if [ -f "$bench/base/src/decompress/mod.rs" ]; then
-    sed -i.orig 's/if std::is_x86_feature_detected!("bmi2")/if !cfg!(sirocco_no_bmi2) \&\& std::is_x86_feature_detected!("bmi2")/' \
-      "$bench/base/src/decompress/mod.rs"
-    rm -f "$bench/base/src/decompress/mod.rs.orig"
-  fi
   rm -f "$bench/base/Cargo.toml.orig"
-  if ! grep -q sirocco_no_bmi2 "$bench/base/Cargo.toml"; then
-    awk '{ print } /^\[workspace\.lints\.rust\]$/ {
-      print "unexpected_cfgs = { level = \"warn\", check-cfg = [\"cfg(sirocco_no_bmi2)\"] }" }' \
-      "$bench/base/Cargo.toml" >"$bench/base/Cargo.toml.new"
-    mv "$bench/base/Cargo.toml.new" "$bench/base/Cargo.toml"
-  fi
   grep -q '^name = "sirocco_base"$' "$bench/base/Cargo.toml" || { echo "could not rename the base package" >&2; exit 1; }
-  if [ "$bmi2" != on ] && ! grep -rq sirocco_no_bmi2 "$bench/base/src"; then
-    echo "base $base_rev has no BMI2 dispatch to switch off; use --bmi2 on" >&2
-    exit 1
-  fi
   base_dep='sirocco_base = { path = "../base" }'
-  # Bases from before the `inflate` module have sirocco 0.1's API.
-  if [ -d "$bench/base/src/inflate" ]; then inflater=sirocco_inflater; else inflater=sirocco_v01_inflater; fi
-  main="compare::$inflater!(Base, \"base\", sirocco_base);
+  main="compare::sirocco_inflater!(Base, \"base\", sirocco_base);
 
 fn main() {
     compare::suite::main(vec![Box::new(Base::new())]);

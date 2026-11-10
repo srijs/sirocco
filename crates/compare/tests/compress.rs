@@ -5,6 +5,8 @@
 
 #![allow(clippy::cast_precision_loss)]
 
+mod common;
+
 use compare::deflate::{
     check_round_trip, check_stream, sirocco_compress, sirocco_compress_stream, zlib_compress, Step,
 };
@@ -69,24 +71,10 @@ fn sizes_match_zlib() {
     check_sizes(&text, 0.25, 0.25);
 }
 
-/// Data with a mix of literals, short-offset matches and long runs.
-fn mixed_data() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(
-        prop_oneof![
-            prop::collection::vec(any::<u8>(), 0..64),
-            (any::<u8>(), 1usize..600).prop_map(|(b, n)| vec![b; n]),
-            (prop::collection::vec(any::<u8>(), 1..9), 1usize..80).prop_map(|(p, n)| p.repeat(n)),
-            prop::collection::vec(prop::sample::select(b"abcde ".to_vec()), 0..300),
-        ],
-        0..60,
-    )
-    .prop_map(|chunks| chunks.concat())
-}
-
-/// Larger data: `mixed_data` repeated with changes, so that matches reach
+/// Larger data: `common::mixed_data` repeated with changes, so that matches reach
 /// far back and blocks fill up.
 fn big_data() -> impl Strategy<Value = Vec<u8>> {
-    (mixed_data(), 1usize..300, any::<u64>()).prop_map(|(base, reps, seed)| {
+    (common::mixed_data(60, true), 1usize..300, any::<u64>()).prop_map(|(base, reps, seed)| {
         let mut rng = compare::Rng(seed | 1);
         let mut out = Vec::new();
         for _ in 0..reps {
@@ -127,7 +115,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(cases()))]
 
     #[test]
-    fn small_inputs_round_trip(data in mixed_data(), level in 0u8..=9, f in 0usize..3) {
+    fn small_inputs_round_trip(data in common::mixed_data(60, true), level in 0u8..=9, f in 0usize..3) {
         let format = Format::ALL[f];
         let c = sirocco_compress(format, level, &data);
         prop_assert!(c.len() <= compress_bound(format.ff(), data.len()));

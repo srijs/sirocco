@@ -238,37 +238,17 @@ struct Group {
     data: Vec<Vec<u8>>,
 }
 
-fn read_dir(dir: &std::path::Path, out: &mut Vec<Vec<u8>>) {
-    let mut paths: Vec<_> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    paths.sort();
-    for p in paths {
-        if p.file_name().unwrap().to_string_lossy().starts_with('.') {
-            continue;
-        }
-        if p.is_dir() {
-            read_dir(&p, out);
-        } else {
-            out.push(std::fs::read(&p).unwrap());
-        }
-    }
-}
-
 fn groups(dirs: &[String]) -> Vec<Group> {
     let mut groups = Vec::new();
     let mut add = |name: String, dir: &std::path::Path| {
-        let mut data = Vec::new();
-        read_dir(dir, &mut data);
+        let mut paths = Vec::new();
+        compare::walk(dir, &mut paths);
+        paths.sort();
+        let data = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
         groups.push(Group { name, data });
     };
     if dirs.is_empty() {
-        let root = std::env::var_os("SIROCCO_CORPUS_DIR").map_or_else(
-            || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus"),
-            Into::into,
-        );
-        if let Ok(rd) = std::fs::read_dir(&root) {
+        if let Some(rd) = compare::corpus_dir().and_then(|root| std::fs::read_dir(root).ok()) {
             let mut sets: Vec<_> = rd
                 .map(|e| e.unwrap().path())
                 .filter(|p| p.is_dir())

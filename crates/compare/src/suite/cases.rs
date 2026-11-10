@@ -6,7 +6,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::{Format, Outcome, ReferenceDecompressor};
+use crate::{reference_decompress, Format, Outcome, Rng};
 
 /// Decompressed size classes, by the length of each stream's output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -180,26 +180,6 @@ impl Enc {
                 out
             }
         }
-    }
-}
-
-/// xorshift64, so every run builds the same cases.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-
-    fn below(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
-    }
-
-    fn range(&mut self, r: Range<usize>) -> usize {
-        r.start + self.below(r.end - r.start)
     }
 }
 
@@ -442,7 +422,6 @@ pub fn pack(path: &Path, max: usize) -> Vec<Case> {
     let count = u32::from_be_bytes(pack[8..12].try_into().unwrap()) as usize;
     let name = pack_name(path);
 
-    let mut reference = ReferenceDecompressor::new();
     // (input range in `pack`, decompressed bytes)
     let mut entries: Vec<(Range<usize>, Vec<u8>)> = Vec::new();
     let mut pos = 12;
@@ -471,7 +450,7 @@ pub fn pack(path: &Path, max: usize) -> Vec<Case> {
             7 => pos += 20,
             _ => {}
         }
-        match reference.decompress(Format::Zlib, &pack[pos..], size) {
+        match reference_decompress(Format::Zlib, &pack[pos..], size) {
             Outcome::Ok(consumed, data) => {
                 assert_eq!(data.len(), size, "pack entry size");
                 entries.push((pos..pos + consumed, data));

@@ -7,7 +7,7 @@
 
 use sirocco::deflate::{Encoder, Flush, Level};
 
-use crate::{Format, Outcome, ReferenceDecompressor};
+use crate::{reference_decompress, Format, Outcome};
 
 /// Compresses `data` with zlib at `level` (0-9).
 #[must_use]
@@ -29,14 +29,19 @@ pub fn zlib_compress(format: Format, level: u32, data: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Decompresses `data`, which must be exactly one stream of at most
-/// `max_len` bytes of output, with zlib.
-pub fn zlib_decompress(format: Format, data: &[u8], max_len: usize) -> Result<Vec<u8>, String> {
-    let mut d = match format {
+/// A zlib decompressor for `format`.
+fn zlib_decompressor(format: Format) -> flate2::Decompress {
+    match format {
         Format::Deflate => flate2::Decompress::new(false),
         Format::Zlib => flate2::Decompress::new(true),
         Format::Gzip => flate2::Decompress::new_gzip(15),
-    };
+    }
+}
+
+/// Decompresses `data`, which must be exactly one stream of at most
+/// `max_len` bytes of output, with zlib.
+pub fn zlib_decompress(format: Format, data: &[u8], max_len: usize) -> Result<Vec<u8>, String> {
+    let mut d = zlib_decompressor(format);
     let mut out = Vec::with_capacity(max_len);
     let st = d
         .decompress_vec(data, &mut out, flate2::FlushDecompress::Finish)
@@ -65,11 +70,7 @@ pub fn zlib_decompress_prefix(
     data: &[u8],
     max_len: usize,
 ) -> Result<Vec<u8>, String> {
-    let mut d = match format {
-        Format::Deflate => flate2::Decompress::new(false),
-        Format::Zlib => flate2::Decompress::new(true),
-        Format::Gzip => flate2::Decompress::new_gzip(15),
-    };
+    let mut d = zlib_decompressor(format);
     let mut out = Vec::with_capacity(max_len);
     d.decompress_vec(data, &mut out, flate2::FlushDecompress::Sync)
         .map_err(|e| format!("zlib: {e}"))?;
@@ -104,7 +105,7 @@ pub fn check_round_trip(
         Err(e) => panic!("{e}: {what}"),
     }
     assert_eq!(
-        ReferenceDecompressor::new().decompress(format, compressed, len),
+        reference_decompress(format, compressed, len),
         Outcome::Ok(compressed.len(), data.to_vec()),
         "zlib-rs: {what}"
     );
