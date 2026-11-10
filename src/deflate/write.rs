@@ -20,14 +20,14 @@ use super::tables::{
 
 /// The bits not yet written out, lowest first.
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct Bits {
+struct Bits {
     buf: u64,
     /// At most 63.
-    pub(super) count: u32,
+    count: u32,
 }
 
 impl Bits {
-    pub(super) const EMPTY: Bits = Bits { buf: 0, count: 0 };
+    const EMPTY: Bits = Bits { buf: 0, count: 0 };
 
     #[inline(always)]
     fn add(&mut self, v: u64, n: u32) {
@@ -47,7 +47,7 @@ impl Bits {
     }
 
     /// Writes out whole bytes while there is room.
-    pub(super) fn flush_bytes(&mut self, out: &mut [u8], op: &mut usize) {
+    fn flush_bytes(&mut self, out: &mut [u8], op: &mut usize) {
         while self.count >= 8 && *op < out.len() {
             out[*op] = self.buf as u8;
             *op += 1;
@@ -80,7 +80,7 @@ const STAGE_LEN: usize = (17 + 19 * 3 + 7 * (NUM_LITLEN_SYMS + NUM_OFFSET_SYMS))
 
 /// What is being written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Emit {
+enum Emit {
     Idle,
     /// The staged bits, then the block's body if `body_next`.
     Staged {
@@ -97,8 +97,8 @@ pub(super) enum Emit {
 }
 
 pub(super) struct Writer {
-    pub(super) bits: Bits,
-    pub(super) emit: Emit,
+    bits: Bits,
+    emit: Emit,
     /// The block being written: its length and whether it is the last.
     block_len: u32,
     /// The Huffman block's cost in bits, header included.
@@ -110,7 +110,6 @@ pub(super) struct Writer {
     stage_at: u32,
     /// The block's dynamic codes, if it uses them rather than the static.
     codes: Codes,
-    use_static: bool,
     /// The block's codes packed for writing, each a codeword (and extra
     /// bits) in the low 24 bits and its bit count in the top 8.
     packed: Packed,
@@ -141,7 +140,6 @@ impl Writer {
             stage_len: 0,
             stage_at: 0,
             codes: Codes::EMPTY,
-            use_static: false,
             packed: Packed {
                 litlen: [0; NUM_LITLEN_SYMS],
                 lengths: [0; LENGTHS_LEN],
@@ -268,17 +266,17 @@ impl Writer {
             self.begin_stored(len, last);
             return;
         }
-        self.use_static = fixed <= dynamic;
+        let use_static = fixed <= dynamic;
         self.cost = fixed.min(dynamic);
         self.stage_start();
         self.stage_put(u32::from(last), 1);
-        if self.use_static {
+        if use_static {
             self.stage_put(1, 2);
         } else {
             self.stage_put(2, 2);
             self.stage_dynamic_header(&pre);
         }
-        self.pack(&block.litlen_freqs);
+        self.pack(&block.litlen_freqs, use_static);
         self.emit = Emit::Staged { body_next: true };
     }
 
@@ -296,9 +294,10 @@ impl Writer {
         }
     }
 
-    /// Packs the block's codes for writing, given its litlen frequencies.
-    fn pack(&mut self, freqs: &[u32; NUM_LITLEN_SYMS]) {
-        let c = if self.use_static {
+    /// Packs the block's codes for writing (the static codes if
+    /// `use_static`), given its litlen frequencies.
+    fn pack(&mut self, freqs: &[u32; NUM_LITLEN_SYMS], use_static: bool) {
+        let c = if use_static {
             &STATIC_CODES
         } else {
             &self.codes
@@ -461,7 +460,7 @@ impl Writer {
 /// Where a Huffman block's body is: at sequence `seq`, with `lits` of its
 /// literals written, `at` bytes into the block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Cursor {
+struct Cursor {
     seq: u32,
     lits: u32,
     at: u32,
@@ -487,7 +486,7 @@ const LENGTHS_LEN: usize = MAX_MATCH as usize + 1;
 
 /// A block's codes packed for writing.
 #[derive(Clone, Debug)]
-pub(super) struct Packed {
+struct Packed {
     /// Codeword | bits << 24.
     litlen: [u32; NUM_LITLEN_SYMS],
     /// A length's codeword and extra bits | bits << 24.

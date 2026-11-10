@@ -72,6 +72,13 @@ fn sample(len: usize, seed: u64) -> Vec<u8> {
     out
 }
 
+/// `len` bytes with no matches to speak of.
+fn incompressible(len: u32) -> Vec<u8> {
+    (0..len)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect()
+}
+
 #[test]
 fn one_shot_round_trips() {
     let inputs = [
@@ -81,9 +88,7 @@ fn one_shot_round_trips() {
         vec![b'x'; 100_000],
         sample(1000, 1),
         sample(300_000, 2),
-        (0..200_000u32)
-            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
-            .collect(),
+        incompressible(200_000),
     ];
     for data in &inputs {
         for level in 0..=9 {
@@ -128,9 +133,7 @@ fn headers_match_zlib() {
 
 #[test]
 fn incompressible_input_is_stored() {
-    let data: Vec<u8> = (0..100_000u32)
-        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
-        .collect();
+    let data = incompressible(100_000);
     for level in 0..=9 {
         let c = crate::compress(Format::Deflate, Level::new(level), &data);
         assert!(c.len() <= data.len() + 5 * 3, "level {level}: {}", c.len());

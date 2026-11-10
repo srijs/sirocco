@@ -112,14 +112,14 @@ fn hash(seq: u32, shift: u32) -> usize {
 }
 
 #[inline(always)]
-pub(super) fn load32(buf: &[u8], pos: usize) -> u32 {
+fn load32(buf: &[u8], pos: usize) -> u32 {
     u32::from_le_bytes(*buf[pos..].first_chunk().unwrap())
 }
 
 /// The length of the match between `a` and `b`, which have the same length,
 /// knowing their first `start` bytes match.
 #[inline(always)]
-pub(super) fn extend(a: &[u8], b: &[u8], start: usize) -> u32 {
+fn extend(a: &[u8], b: &[u8], start: usize) -> u32 {
     let b = &b[..a.len()];
     let mut len = start;
     while len + 8 <= a.len() {
@@ -254,10 +254,14 @@ impl MatchFinder {
         // from the heads, which write them first.
     }
 
+    /// The number of `hash4` entries in use.
+    fn heads_len(&self) -> usize {
+        (1 << (32 - self.shift4)) * self.ht.max(1)
+    }
+
     /// The part of `hash4` in use.
     fn heads<'t>(&self, tables: &'t mut LzTables<'_>) -> &'t mut [u16] {
-        let n = (1 << (32 - self.shift4)) * self.ht.max(1);
-        &mut tables.hash4[..n]
+        &mut tables.hash4[..self.heads_len()]
     }
 
     /// The position relative to the base of buffer position `cur`, rebasing
@@ -272,7 +276,7 @@ impl MatchFinder {
         // state (and the rest of the parser's) can stay in registers
         // through the loops that inline this.
         let windows = rel / WINDOW;
-        let n4 = (1 << (32 - self.shift4)) * self.ht.max(1);
+        let n4 = self.heads_len();
         let next = if self.ht == 0 {
             &mut tables.next[..]
         } else {
@@ -696,6 +700,12 @@ mod tests {
 
     use super::*;
 
+    /// The limits away from the input's end, at the longest nice length.
+    const FULL: Limits = Limits {
+        max: MAX_MATCH,
+        nice: MAX_MATCH,
+    };
+
     #[test]
     fn extend_counts_matching_bytes() {
         let buf: Vec<u8> = (0..100).map(|i| (i % 7) as u8).collect();
@@ -820,10 +830,6 @@ mod tests {
             period as u32,
             depth,
         );
-        let lim = Limits {
-            max: 258,
-            nice: 258,
-        };
         // The shortest match is 4.
         let best = 3;
         for cur in start + len..data.len() - 300 {
@@ -833,8 +839,8 @@ mod tests {
                 (depth >> 1).max(1)
             };
             prop_assert_eq!(
-                a.hc_longest(&mut ta, data, cur, best, lim, d),
-                b.hc_longest(&mut tb, data, cur, best, lim, d),
+                a.hc_longest(&mut ta, data, cur, best, FULL, d),
+                b.hc_longest(&mut tb, data, cur, best, FULL, d),
                 "position {}",
                 cur
             );
@@ -872,47 +878,20 @@ mod tests {
             let (mut found, mut far) = (0, 0);
             while cur + 300 < data.len() {
                 let (len, off) = if ht == 1 {
-                    mf.ht_longest::<1>(
-                        &mut t,
-                        &data,
-                        cur,
-                        Limits {
-                            max: 258,
-                            nice: 258,
-                        },
-                    )
+                    mf.ht_longest::<1>(&mut t, &data, cur, FULL)
                 } else if ht == 2 {
-                    mf.ht_longest::<2>(
-                        &mut t,
-                        &data,
-                        cur,
-                        Limits {
-                            max: 258,
-                            nice: 258,
-                        },
-                    )
+                    mf.ht_longest::<2>(&mut t, &data, cur, FULL)
                 } else {
-                    mf.hc_longest(
-                        &mut t,
-                        &data,
-                        cur,
-                        2,
-                        Limits {
-                            max: 258,
-                            nice: 258,
-                        },
-                        50,
-                    )
+                    mf.hc_longest(&mut t, &data, cur, 3, FULL, 50)
                 };
-                // A length of 0 or (hc) 2 is no match, whatever the offset.
-                if len >= 3 {
+                // Every match is at least 4 long; 0 or (hc) 3 is none.
+                if len >= 4 {
                     let off = off as usize;
                     assert!((1..WINDOW).contains(&off), "offset {off}");
                     assert_eq!(
                         data[cur - off..][..len as usize],
                         data[cur..][..len as usize]
                     );
-                    assert!(len >= 3);
                     found += 1;
                     far += usize::from(off > 16_000);
                 }

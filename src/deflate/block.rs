@@ -22,12 +22,10 @@ pub(super) const SEQ_STORE_LENGTH: usize = SOFT_MAX_BLOCK_LENGTH / 6;
 
 /// The longest block: one that reaches past the soft maximum with a lazy
 /// match, or a last block allowed to grow rather than leave a short one.
-pub(super) const MAX_BLOCK_LENGTH: usize = SOFT_MAX_BLOCK_LENGTH
-    + if MIN_BLOCK_LENGTH > 3 + 258 {
-        MIN_BLOCK_LENGTH
-    } else {
-        3 + 258
-    };
+pub(super) const MAX_BLOCK_LENGTH: usize = SOFT_MAX_BLOCK_LENGTH + MIN_BLOCK_LENGTH;
+
+// libdeflate adds the larger of `MIN_BLOCK_LENGTH` and a lazy match's reach.
+const _: () = assert!(MIN_BLOCK_LENGTH > 3 + 258);
 
 const _: () = assert!(SEQ_STORE_LENGTH * MIN_MATCH as usize >= MIN_BLOCK_LENGTH);
 // Literal runs and frequencies fit their fields (`Seq` and the Huffman
@@ -215,8 +213,8 @@ impl Block {
 
     /// Whether the store has room for another match.
     #[inline(always)]
-    pub(super) fn has_room(&self, limit: usize) -> bool {
-        self.n < limit
+    pub(super) fn has_room(&self) -> bool {
+        self.n < SEQ_STORE_LENGTH
     }
 
     /// The open sequence, for a parser to keep in registers: the number of
@@ -232,8 +230,8 @@ impl Block {
     }
 
     #[inline(always)]
-    pub(super) fn literal<const OBSERVE: bool>(&mut self, lit: u8) {
-        self.count_literal::<OBSERVE>(lit);
+    pub(super) fn literal(&mut self, lit: u8) {
+        self.count_literal::<true>(lit);
         self.lits += 1;
     }
 
@@ -248,8 +246,8 @@ impl Block {
     }
 
     #[inline(always)]
-    pub(super) fn matched<const OBSERVE: bool>(&mut self, seqs: &mut Seqs, len: u32, offset: u32) {
-        self.store_match::<OBSERVE>(seqs, self.n, self.lits, len, offset);
+    pub(super) fn matched(&mut self, seqs: &mut Seqs, len: u32, offset: u32) {
+        self.store_match::<true>(seqs, self.n, self.lits, len, offset);
         self.n += 1;
         self.lits = 0;
     }
@@ -291,16 +289,22 @@ impl Block {
     }
 
     /// The minimum match length worth using, from how many distinct literals
-    /// the block uses (libdeflate's `recalculate_min_match_len`).
+    /// the block uses (libdeflate's `recalculate_min_match_len`), at least
+    /// [`CHAIN_MIN_MATCH`].
     pub(super) fn recalculate_min_len(&self, depth: u32) -> u32 {
         let lits = &self.litlen_freqs[..256];
         let total: u32 = lits.iter().sum();
         // Ignore literals used very rarely.
         let cutoff = total >> 10;
         let used = lits.iter().filter(|&&f| f > cutoff).count();
-        choose_min_len(used, depth)
+        choose_min_len(used, depth).max(CHAIN_MIN_MATCH)
     }
 }
+
+/// The shortest match the hash chains find: they take no 3-byte matches
+/// (libdeflate's take close ones), which cost more than they save on most
+/// data, and keeping a table for them costs every position.
+pub(super) const CHAIN_MIN_MATCH: u32 = 4;
 
 /// The minimum match length worth using for the greedy and lazy parsers,
 /// from libdeflate. With few distinct literals, literals are cheap and
@@ -319,10 +323,11 @@ fn choose_min_len(used_literals: usize, depth: u32) -> u32 {
         return MIN_MATCH;
     };
     let min_len = u32::from(min_len);
-    // With a shallow search, long matches are hard to find.
+    // With a shallow search, long matches are hard to find. (libdeflate
+    // caps depths under 5 at 4, which `CHAIN_MIN_MATCH` makes moot; the
+    // chain levels search at least 6 deep.)
     match depth {
-        0..5 => min_len.min(4),
-        5..10 => min_len.min(5),
+        0..10 => min_len.min(5),
         10..16 => min_len.min(7),
         _ => min_len,
     }
@@ -330,17 +335,18 @@ fn choose_min_len(used_literals: usize, depth: u32) -> u32 {
 
 /// The minimum match length for a block starting with `data`, from the
 /// distinct literals in its first 4 KiB (libdeflate's
-/// `calculate_min_match_len`). `len` is the block's expected length.
+/// `calculate_min_match_len`), at least [`CHAIN_MIN_MATCH`]. `len` is the
+/// block's expected length.
 pub(super) fn calculate_min_len(data: &[u8], len: usize, depth: u32) -> u32 {
     // Small inputs likely use the static code, where short matches pay.
     if len < 512 {
-        return MIN_MATCH;
+        return CHAIN_MIN_MATCH;
     }
     let mut used = [false; 256];
     for &b in &data[..data.len().min(4096)] {
         used[b as usize] = true;
     }
-    choose_min_len(used.iter().filter(|&&u| u).count(), depth)
+    choose_min_len(used.iter().filter(|&&u| u).count(), depth).max(CHAIN_MIN_MATCH)
 }
 
 #[cfg(test)]

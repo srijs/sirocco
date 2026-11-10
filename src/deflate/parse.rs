@@ -8,8 +8,8 @@
 //! they would in one call. At a flush or the end, everything is parsed.
 
 use super::block::{
-    calculate_min_len, carve_seqs, Block, Seqs, MIN_BLOCK_LENGTH, SEQS_LEN, SEQ_STORE_LENGTH,
-    SOFT_MAX_BLOCK_LENGTH,
+    calculate_min_len, carve_seqs, Block, Seqs, CHAIN_MIN_MATCH, MIN_BLOCK_LENGTH, SEQS_LEN,
+    SEQ_STORE_LENGTH, SOFT_MAX_BLOCK_LENGTH,
 };
 use super::lz::{Limits, LzTables, MatchFinder, LZ_TABLES_LEN, SEARCH_NBYTES};
 use super::tables::MAX_MATCH;
@@ -39,11 +39,6 @@ pub(super) enum Strategy {
     /// Takes a match unless the next position has a better one.
     Lazy,
 }
-
-/// The shortest match the hash chains find: they take no 3-byte matches
-/// (libdeflate's take close ones), which cost more than they save on most
-/// data, and keeping a table for them costs every position.
-const CHAIN_MIN_MATCH: u32 = 4;
 
 /// Levels 1 to 3, whose settings their loops take as constants (as
 /// variables, they cost each loop registers it is short of; see
@@ -154,7 +149,7 @@ impl Parser {
         });
         // Only the hash chain parsers use the minimum match length.
         if matches!(p.strategy, Strategy::Greedy | Strategy::Lazy) {
-            self.min_len = calculate_min_len(avail, len, p.depth).max(CHAIN_MIN_MATCH);
+            self.min_len = calculate_min_len(avail, len, p.depth);
             self.next_recalc = avail.len().min(10_000);
         }
     }
@@ -378,11 +373,11 @@ impl Parser {
             let (len, offset) = mf.hc_longest(lz, buf, pos, min_len - 1, lim, p.depth);
             if len >= min_len {
                 misses = 0;
-                block.matched::<true>(seqs, len, offset);
+                block.matched(seqs, len, offset);
                 mf.hc_skip_match(lz, buf, pos + 1, len - 1, offset, p.depth);
                 pos += len as usize;
             } else {
-                block.literal::<true>(buf[pos]);
+                block.literal(buf[pos]);
                 pos += 1;
                 if p.accel > 0 && mf.warm {
                     misses += 1;
@@ -390,14 +385,14 @@ impl Parser {
                     if step > 0 {
                         let end = (pos + step as usize).min(limit);
                         for &b in &buf[pos..end] {
-                            block.literal::<true>(b);
+                            block.literal(b);
                         }
                         pos = end;
                         mf.jump(lz, buf, pos);
                     }
                 }
             }
-            if !block.has_room(SEQ_STORE_LENGTH) || block.should_end(pos, end.map(|e| e - pos)) {
+            if !block.has_room() || block.should_end(pos, end.map(|e| e - pos)) {
                 self.pos = pos;
                 return true;
             }
@@ -425,7 +420,7 @@ impl Parser {
             // Recalculate the minimum match length now and then, at
             // doubling intervals.
             if pos - block.start >= self.next_recalc {
-                self.min_len = block.recalculate_min_len(p.depth).max(CHAIN_MIN_MATCH);
+                self.min_len = block.recalculate_min_len(p.depth);
                 self.next_recalc += (pos - block.start).max(1);
             }
             let min_len = self.min_len;
@@ -433,14 +428,14 @@ impl Parser {
             let (mut cur_len, mut cur_offset) =
                 mf.hc_longest(lz, buf, pos, min_len - 1, lim, p.depth);
             if cur_len < min_len {
-                block.literal::<true>(buf[pos]);
+                block.literal(buf[pos]);
                 pos += 1;
             } else {
                 pos += 1;
                 loop {
                     // A match at `pos - 1`: take it if it's long enough...
                     if cur_len >= lim.nice {
-                        block.matched::<true>(seqs, cur_len, cur_offset);
+                        block.matched(seqs, cur_len, cur_offset);
                         mf.hc_skip_match(lz, buf, pos, cur_len - 1, cur_offset, p.depth);
                         pos += cur_len as usize - 1;
                         break;
@@ -455,18 +450,18 @@ impl Parser {
                     if next_len >= cur_len
                         && 4 * (next_len - cur_len) as i32 + bsr(cur_offset) - bsr(next_offset) > 2
                     {
-                        block.literal::<true>(buf[pos - 2]);
+                        block.literal(buf[pos - 2]);
                         (cur_len, cur_offset) = (next_len, next_offset);
                         continue;
                     }
-                    block.matched::<true>(seqs, cur_len, cur_offset);
+                    block.matched(seqs, cur_len, cur_offset);
                     // The search at the next position went half as deep.
                     mf.hc_skip_match(lz, buf, pos, cur_len - 2, cur_offset, p.depth);
                     pos += cur_len as usize - 2;
                     break;
                 }
             }
-            if !block.has_room(SEQ_STORE_LENGTH) || block.should_end(pos, end.map(|e| e - pos)) {
+            if !block.has_room() || block.should_end(pos, end.map(|e| e - pos)) {
                 self.pos = pos;
                 return true;
             }
