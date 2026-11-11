@@ -526,11 +526,8 @@ pub(super) struct Tables {
     sorted_syms: [u16; MAX_NUM_SYMS],
     /// Whether `litlen` and `offset` hold the static codes.
     static_loaded: bool,
-    /// Whether the next dynamic litlen table gets pair entries (and
-    /// `LITLEN_TABLEBITS` main table bits rather than
-    /// `LITLEN_TABLEBITS_PLAIN`).
-    pub(super) pairs: bool,
-    /// The litlen main table's bits.
+    /// The litlen main table's bits: `LITLEN_TABLEBITS` with pair entries,
+    /// `LITLEN_TABLEBITS_PLAIN` without.
     pub(super) litlen_bits: u32,
 }
 
@@ -552,7 +549,6 @@ impl Tables {
             offset: [0; OFFSET_ENOUGH],
             sorted_syms: [0; MAX_NUM_SYMS],
             static_loaded: false,
-            pairs: false,
             litlen_bits: LITLEN_TABLEBITS_PLAIN,
         }
     }
@@ -568,26 +564,30 @@ impl Tables {
     }
 
     /// Builds the litlen and offset tables from the first `num_litlen_syms`
-    /// and the next `num_offset_syms` of `lens`. Returns whether they make
-    /// valid codes.
+    /// and the next `num_offset_syms` of `lens`, the litlen table with pair
+    /// entries if `pairs`. Returns whether they make valid codes.
     #[inline(always)]
-    pub(super) fn build_dynamic(&mut self, num_litlen_syms: usize, num_offset_syms: usize) -> bool {
+    pub(super) fn build_dynamic(
+        &mut self,
+        num_litlen_syms: usize,
+        num_offset_syms: usize,
+        pairs: bool,
+    ) -> bool {
         self.static_loaded = false;
-        self.litlen_bits = if self.pairs {
+        let (litlen_lens, offset_lens) =
+            self.lens[..num_litlen_syms + num_offset_syms].split_at(num_litlen_syms);
+        self.litlen_bits = if pairs {
             LITLEN_TABLEBITS
         } else {
             LITLEN_TABLEBITS_PLAIN
         };
-        let (litlen_lens, offset_lens) =
-            self.lens[..num_litlen_syms + num_offset_syms].split_at(num_litlen_syms);
-        build_offset_table(&mut self.offset, offset_lens, &mut self.sorted_syms)
-            && build_litlen_table(
-                &mut self.litlen,
-                litlen_lens,
-                &mut self.sorted_syms,
-                self.litlen_bits,
-                self.pairs,
-            )
+        let (table, sorted) = (&mut self.litlen, &mut self.sorted_syms);
+        build_offset_table(&mut self.offset, offset_lens, sorted)
+            && if pairs {
+                build_litlen_table::<true>(table, litlen_lens, sorted)
+            } else {
+                build_litlen_table::<false>(table, litlen_lens, sorted)
+            }
     }
 
     /// Loads the static Huffman codes, which stay loaded until the next
@@ -623,37 +623,28 @@ fn build_precode_table(
     )
 }
 
-/// Builds the litlen table, with a main table of `table_bits` bits, and with
-/// `pairs`, pair entries.
+/// Builds the litlen table, with pair entries if `PAIRS` (and a main table
+/// of `LITLEN_TABLEBITS` bits, not `LITLEN_TABLEBITS_PLAIN`).
 #[inline(never)]
-fn build_litlen_table(
+fn build_litlen_table<const PAIRS: bool>(
     table: &mut [u32; LITLEN_ENOUGH],
     lens: &[u8],
     sorted_syms: &mut [u16; MAX_NUM_SYMS],
-    table_bits: u32,
-    pairs: bool,
 ) -> bool {
-    if pairs {
-        build_decode_table::<true>(
-            table,
-            lens,
-            &LITLEN_DECODE_RESULTS,
-            table_bits,
-            MAX_LITLEN_CODEWORD_LEN,
-            sorted_syms,
-            Some(286),
-        )
+    let table_bits = if PAIRS {
+        LITLEN_TABLEBITS
     } else {
-        build_decode_table::<false>(
-            table,
-            lens,
-            &LITLEN_DECODE_RESULTS,
-            table_bits,
-            MAX_LITLEN_CODEWORD_LEN,
-            sorted_syms,
-            Some(286),
-        )
-    }
+        LITLEN_TABLEBITS_PLAIN
+    };
+    build_decode_table::<PAIRS>(
+        table,
+        lens,
+        &LITLEN_DECODE_RESULTS,
+        table_bits,
+        MAX_LITLEN_CODEWORD_LEN,
+        sorted_syms,
+        Some(286),
+    )
 }
 
 #[inline(never)]
@@ -761,9 +752,8 @@ mod tests {
     #[test]
     fn static_tables_match_built_tables() {
         let mut t = Tables::new();
-        t.pairs = false;
         t.lens[..STATIC_LENS.len()].copy_from_slice(&STATIC_LENS);
-        assert!(t.build_dynamic(NUM_LITLEN_SYMS, NUM_OFFSET_SYMS));
+        assert!(t.build_dynamic(NUM_LITLEN_SYMS, NUM_OFFSET_SYMS, false));
         assert_eq!(t.litlen[..STATIC_LITLEN_TABLE.len()], STATIC_LITLEN_TABLE);
         assert_eq!(t.offset[..STATIC_OFFSET_TABLE.len()], STATIC_OFFSET_TABLE);
     }

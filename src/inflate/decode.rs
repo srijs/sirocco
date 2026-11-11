@@ -84,9 +84,6 @@ const fn bitmask(n: u32) -> BitBuf {
     (1 << n) - 1
 }
 
-/// The value a length or offset entry decodes to: its base plus the extra
-/// bits that follow the codeword in `saved`, the bit buffer from before the
-/// entry was consumed. With BMI2 enabled the masking compiles to `bzhi`.
 /// Whether a dynamic block's litlen table should get literal pair entries,
 /// with `input` compressed bytes left to decode it from and room for `room`
 /// bytes of output: whether its literals are likely enough to repay building
@@ -130,8 +127,7 @@ fn pair_in_generic_loop<const WRITE: bool>(
     saved_bitbuf: BitBuf,
 ) -> Bits {
     if room_for_one {
-        bits.buf = saved_bitbuf;
-        bits.left = bits.left.wrapping_add(entry);
+        bits.unconsume_entry(saved_bitbuf, entry);
         bits.consume((entry >> PAIR_FIRST_LEN_SHIFT) & 15);
         if WRITE {
             output[out_pos] = (entry >> 8) as u8;
@@ -143,6 +139,9 @@ fn pair_in_generic_loop<const WRITE: bool>(
     bits
 }
 
+/// The value a length or offset entry decodes to: its base plus the extra
+/// bits that follow the codeword in `saved`, the bit buffer from before the
+/// entry was consumed. With BMI2 enabled the masking compiles to `bzhi`.
 #[inline(always)]
 fn entry_value(entry: u32, saved: BitBuf) -> usize {
     (entry >> 16) as usize + ((saved & bitmask(entry as u8 as u32)) >> (entry >> 8) as u8)
@@ -183,6 +182,14 @@ impl Bits {
     fn consume_entry(&mut self, entry: u32) {
         self.buf >>= entry as u8;
         self.left = self.left.wrapping_sub(entry);
+    }
+
+    /// Undoes [`consume_entry`](Self::consume_entry), `saved` being the bit
+    /// buffer from before it.
+    #[inline(always)]
+    fn unconsume_entry(&mut self, saved: BitBuf, entry: u32) {
+        self.buf = saved;
+        self.left = self.left.wrapping_add(entry);
     }
 
     /// The index of the subtable entry that the subtable pointer `entry`
@@ -558,8 +565,7 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
                     // which is rare) goes to the generic loop, which can
                     // pause or fail cleanly before it. Nothing since the
                     // entry was consumed, so put its bits back.
-                    bits.buf = saved_bitbuf;
-                    bits.left = bits.left.wrapping_add(entry);
+                    bits.unconsume_entry(saved_bitbuf, entry);
                     break 'done FastExit::Margin;
                 }
                 if entry & HUFFDEC_EXCEPTIONAL != 0 {
@@ -1118,8 +1124,8 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
                     bad!();
                 }
 
-                t.pairs = pairs_pay(input.len() - c.in_pos, out_len - c.out_pos, more_input);
-                if !t.build_dynamic(num_litlen_syms, num_offset_syms) {
+                let pairs = pairs_pay(input.len() - c.in_pos, out_len - c.out_pos, more_input);
+                if !t.build_dynamic(num_litlen_syms, num_offset_syms, pairs) {
                     bad!();
                 }
             } else if block_type == DEFLATE_BLOCKTYPE_UNCOMPRESSED {
