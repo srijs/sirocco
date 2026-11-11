@@ -12,7 +12,7 @@ use super::block::{
     SOFT_MAX_BLOCK_LENGTH,
 };
 use super::lz::{Limits, LzTables, MatchFinder, LZ_TABLES_LEN, SEARCH_NBYTES};
-use super::tables::{MAX_MATCH, MIN_MATCH};
+use super::tables::MAX_MATCH;
 
 /// The input a parser wants after a position, unless there is no more: a
 /// longest match from each of the 2 positions lazy parsing looks at, plus
@@ -31,9 +31,9 @@ const _: () = assert!(FAST_SEQ_STORE_LENGTH * 4 >= MIN_BLOCK_LENGTH);
 pub(super) enum Strategy {
     /// Stored blocks only.
     Stored,
-    /// With the hash table matchfinder, `depth` entries per bucket (1 or 2):
-    /// a match gives way to a longer one at the next position.
-    Fast,
+    /// With the hash table matchfinder: a match gives way to a longer one at
+    /// the next position.
+    Fast(FastLevel),
     /// Greedy, with the hash chains.
     Greedy,
     /// Takes a match unless the next position has a better one.
@@ -45,17 +45,30 @@ pub(super) enum Strategy {
 /// data, and keeping a table for them costs every position.
 const CHAIN_MIN_MATCH: u32 = 4;
 
-/// The fast levels' settings, which their loops take as constants (as
-/// variables, they cost each loop registers it is short of): the hash
-/// table's bucket size (`depth`), `insert` and `accel`, for levels 1 to 3.
-/// Their nice length is [`FAST_NICE`].
-pub(super) const FAST_LEVELS: [(u32, u32, u32); 3] = [(1, 0, 12), (1, 16, 4), (2, 32, 4)];
-pub(super) const FAST_NICE: u32 = 32;
-const FAST1: (u32, u32, u32) = FAST_LEVELS[0];
-const FAST2: (u32, u32, u32) = FAST_LEVELS[1];
-const FAST3: (u32, u32, u32) = FAST_LEVELS[2];
+/// Levels 1 to 3, whose settings their loops take as constants (as
+/// variables, they cost each loop registers it is short of; see
+/// [`Parser::parse`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FastLevel {
+    One,
+    Two,
+    Three,
+}
 
-/// A level's parameters.
+impl FastLevel {
+    /// The hash table's bucket size.
+    pub(super) const fn bucket(self) -> usize {
+        match self {
+            FastLevel::One | FastLevel::Two => 1,
+            FastLevel::Three => 2,
+        }
+    }
+}
+
+/// The fast levels' nice length: a match this long is taken as it is.
+const FAST_NICE: u32 = 32;
+
+/// A hash chain level's parameters (the fast levels' are constants).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Params {
     pub(super) strategy: Strategy,
@@ -63,14 +76,11 @@ pub(super) struct Params {
     pub(super) depth: u32,
     /// Stop searching at a match this long.
     pub(super) nice: u32,
-    /// The hash table and greedy: the positions inside a match longer than
-    /// this, but for its last, aren't searched later, as zlib's
-    /// `max_insert_length`.
-    pub(super) insert: u32,
-    /// The hash table and greedy: after `64 / accel` literals in a row,
-    /// search every other position, then every third, and so on, a step
-    /// longer every `64 / accel` literals, as lz4 does; 0 for never. Not in a stream's first window, where misses are as much
-    /// the empty tables' as the input's.
+    /// Greedy: after `64 / accel` literals in a row, search every other
+    /// position, then every third, and so on, a step longer every
+    /// `64 / accel` literals, as lz4 does; 0 for never. Not in a stream's
+    /// first window, where misses are as much the empty tables' as the
+    /// input's.
     pub(super) accel: u32,
 }
 
@@ -108,6 +118,8 @@ pub(super) struct Parser {
     /// Whether `block` holds a block being built (rather than one being
     /// written, or none).
     pub(super) open: bool,
+    /// The hash chain parsers' minimum match length, at least
+    /// [`CHAIN_MIN_MATCH`].
     min_len: u32,
     /// When to recalculate `min_len`, as an offset into the block.
     next_recalc: usize,
@@ -126,7 +138,7 @@ impl Parser {
             block: Block::new(),
             pos: 0,
             open: false,
-            min_len: MIN_MATCH,
+            min_len: CHAIN_MIN_MATCH,
             next_recalc: 0,
         }
     }
@@ -142,7 +154,7 @@ impl Parser {
         });
         // Only the hash chain parsers use the minimum match length.
         if matches!(p.strategy, Strategy::Greedy | Strategy::Lazy) {
-            self.min_len = calculate_min_len(avail, len, p.depth);
+            self.min_len = calculate_min_len(avail, len, p.depth).max(CHAIN_MIN_MATCH);
             self.next_recalc = avail.len().min(10_000);
         }
     }
@@ -169,21 +181,19 @@ impl Parser {
     ) -> bool {
         match p.strategy {
             Strategy::Stored => self.stored(stop, end),
-            Strategy::Fast => match (p.depth, p.insert, p.accel) {
-                FAST1 => self.parse_fast::<{ FAST1.0 as usize }, { FAST1.1 }, { FAST1.2 }>(
-                    t, buf, stop, end,
-                ),
-                FAST2 => self.parse_fast::<{ FAST2.0 as usize }, { FAST2.1 }, { FAST2.2 }>(
-                    t, buf, stop, end,
-                ),
-                // The fast levels have only these settings.
-                _ => {
-                    debug_assert_eq!((p.depth, p.insert, p.accel), FAST3);
-                    self.parse_fast::<{ FAST3.0 as usize }, { FAST3.1 }, { FAST3.2 }>(
-                        t, buf, stop, end,
-                    )
-                }
-            },
+            // The fast levels' settings: the bucket size, the insert limit
+            // (the positions inside a longer match, but for its last,
+            // aren't searched later, as zlib's `max_insert_length`) and the
+            // acceleration (as `Params::accel`).
+            Strategy::Fast(FastLevel::One) => {
+                self.parse_fast::<{ FastLevel::One.bucket() }, 0, 12>(t, buf, stop, end)
+            }
+            Strategy::Fast(FastLevel::Two) => {
+                self.parse_fast::<{ FastLevel::Two.bucket() }, 16, 4>(t, buf, stop, end)
+            }
+            Strategy::Fast(FastLevel::Three) => {
+                self.parse_fast::<{ FastLevel::Three.bucket() }, 32, 4>(t, buf, stop, end)
+            }
             Strategy::Greedy => self.parse_greedy(t, p, buf, stop, end),
             Strategy::Lazy => self.parse_lazy(t, p, buf, stop, end),
         }
@@ -360,7 +370,7 @@ impl Parser {
         let limit = stop.min(max_end);
         let block = &mut self.block;
         let (lz, seqs) = (&mut t.lz, &mut *t.seqs);
-        let min_len = self.min_len.max(CHAIN_MIN_MATCH);
+        let min_len = self.min_len;
         let mut pos = self.pos;
         let mut misses = 0u32;
         while pos < limit {
@@ -369,13 +379,7 @@ impl Parser {
             if len >= min_len {
                 misses = 0;
                 block.matched::<true>(seqs, len, offset);
-                if len <= p.insert {
-                    mf.hc_skip_match(lz, buf, pos + 1, len - 1, offset, p.depth);
-                } else {
-                    let last = pos + len as usize - 1;
-                    mf.jump(lz, buf, last);
-                    mf.hc_skip(lz, buf, last, 1);
-                }
+                mf.hc_skip_match(lz, buf, pos + 1, len - 1, offset, p.depth);
                 pos += len as usize;
             } else {
                 block.literal::<true>(buf[pos]);
@@ -421,10 +425,10 @@ impl Parser {
             // Recalculate the minimum match length now and then, at
             // doubling intervals.
             if pos - block.start >= self.next_recalc {
-                self.min_len = block.recalculate_min_len(p.depth);
+                self.min_len = block.recalculate_min_len(p.depth).max(CHAIN_MIN_MATCH);
                 self.next_recalc += (pos - block.start).max(1);
             }
-            let min_len = self.min_len.max(CHAIN_MIN_MATCH);
+            let min_len = self.min_len;
             let lim = Limits::at(buf.len(), pos, p.nice);
             let (mut cur_len, mut cur_offset) =
                 mf.hc_longest(lz, buf, pos, min_len - 1, lim, p.depth);

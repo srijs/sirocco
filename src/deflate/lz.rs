@@ -92,11 +92,13 @@ pub(super) struct MatchFinder {
     /// The hash's shift: 32 less its bits.
     shift4: u32,
     /// The hash of the next position, precomputed as libdeflate does: hc's
-    /// chain or ht's bucket (the second is unused).
+    /// chain or ht's bucket, in the first. (The second is unused, but as one
+    /// `usize`, level 3 was 2-3% slower.)
     next_hashes: [usize; 2],
     /// The table entries at `next_hashes`, loaded early: hc's chain head
-    /// (and nothing), or ht's bucket. That stands in for libdeflate's prefetches: the next
-    /// search finds them in cache, and ht's uses the bucket as loaded.
+    /// (the first), or ht's bucket. That stands in for libdeflate's
+    /// prefetches: the next search finds them in cache, and ht's uses the
+    /// bucket as loaded.
     next_heads: [u16; 2],
 }
 

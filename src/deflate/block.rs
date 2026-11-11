@@ -118,19 +118,12 @@ impl SplitStats {
     /// `litlen_freqs`, should end, once enough new observations are in.
     fn should_end(&mut self, len: usize, litlen_freqs: &[u32; NUM_LITLEN_SYMS]) -> bool {
         let totals = observation_totals(litlen_freqs);
-        let mut new_observations = [0; NUM_OBSERVATION_TYPES];
-        for ((new, &total), &old) in new_observations
-            .iter_mut()
-            .zip(&totals)
-            .zip(&self.observations)
-        {
-            *new = total - old;
-        }
         if self.num_observations > 0 {
             // The sum of absolute differences of the probabilities, all
             // scaled by both observation counts.
             let mut delta = 0u32;
-            for (&old, &new) in self.observations.iter().zip(&new_observations) {
+            for (&old, &total) in self.observations.iter().zip(&totals) {
+                let new = total - old;
                 let expected = old * self.num_new_observations;
                 let actual = new * self.num_observations;
                 delta += expected.abs_diff(actual);
@@ -153,8 +146,8 @@ impl SplitStats {
 }
 
 /// The observations of each type in symbol counts `litlen_freqs`: literals
-/// by their top two and lowest bits, then matches shorter than 9 (length
-/// symbols up to 262) and longer.
+/// by their top two and lowest bits, then matches shorter than 9 and
+/// longer.
 fn observation_totals(litlen_freqs: &[u32; NUM_LITLEN_SYMS]) -> [u32; NUM_OBSERVATION_TYPES] {
     let mut totals = [0; NUM_OBSERVATION_TYPES];
     for (quarter, lits) in litlen_freqs[..256].as_chunks::<64>().0.iter().enumerate() {
@@ -163,7 +156,7 @@ fn observation_totals(litlen_freqs: &[u32; NUM_LITLEN_SYMS]) -> [u32; NUM_OBSERV
             totals[2 * quarter + 1] += pair[1];
         }
     }
-    let (short, long) = litlen_freqs[FIRST_LEN_SYM..].split_at(6);
+    let (short, long) = litlen_freqs[FIRST_LEN_SYM..].split_at(LENGTH_SLOT[9] as usize);
     totals[NUM_LITERAL_OBSERVATION_TYPES] = short.iter().sum();
     totals[NUM_LITERAL_OBSERVATION_TYPES + 1] = long.iter().sum();
     totals

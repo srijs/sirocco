@@ -1,7 +1,7 @@
 //! [`Encoder`] and the state machine behind it.
 
 use super::block::MAX_BLOCK_LENGTH;
-use super::parse::{Params, Parser, Strategy, Tables, FAST_LEVELS, FAST_NICE, LOOKAHEAD};
+use super::parse::{FastLevel, Params, Parser, Strategy, Tables, LOOKAHEAD};
 use super::tables::WINDOW;
 use super::write::Writer;
 use super::{Flush, Level};
@@ -188,26 +188,22 @@ pub struct Progress<'o> {
 /// replace).
 const fn params(level: Level) -> Params {
     use Strategy::*;
-    // Unlimited inserts.
-    const ALL: u32 = u32::MAX;
-    let (strategy, depth, nice, insert, accel) = match level.0 {
-        0 => (Stored, 0, 0, 0, 0),
-        1..=3 => {
-            let (depth, insert, accel) = FAST_LEVELS[level.0 as usize - 1];
-            (Fast, depth, FAST_NICE, insert, accel)
-        }
-        4 => (Greedy, 6, 32, ALL, 2),
-        5 => (Lazy, 7, 32, ALL, 0),
-        6 => (Lazy, 16, 48, ALL, 0),
-        7 => (Lazy, 24, 48, ALL, 0),
-        8 => (Lazy, 35, 65, ALL, 0),
-        _ => (Lazy, 48, 96, ALL, 0),
+    let (strategy, depth, nice, accel) = match level.0 {
+        0 => (Stored, 0, 0, 0),
+        1 => (Fast(FastLevel::One), 0, 0, 0),
+        2 => (Fast(FastLevel::Two), 0, 0, 0),
+        3 => (Fast(FastLevel::Three), 0, 0, 0),
+        4 => (Greedy, 6, 32, 2),
+        5 => (Lazy, 7, 32, 0),
+        6 => (Lazy, 16, 48, 0),
+        7 => (Lazy, 24, 48, 0),
+        8 => (Lazy, 35, 65, 0),
+        _ => (Lazy, 48, 96, 0),
     };
     Params {
         strategy,
         depth,
         nice,
-        insert,
         accel,
     }
 }
@@ -503,15 +499,12 @@ impl State {
     }
 
     fn reset_matches(&mut self, t: &mut Tables<'_>, pos: usize, len: Option<usize>) {
-        let s = self.params.strategy;
-        if s != Strategy::Stored {
-            let ht = if s == Strategy::Fast {
-                self.params.depth as usize
-            } else {
-                0
-            };
-            self.parser.mf.reset(&mut t.lz, pos, ht, len);
-        }
+        let ht = match self.params.strategy {
+            Strategy::Stored => return,
+            Strategy::Fast(level) => level.bucket(),
+            Strategy::Greedy | Strategy::Lazy => 0,
+        };
+        self.parser.mf.reset(&mut t.lz, pos, ht, len);
     }
 
     /// Parses and ends blocks. Returns `false` when it needs more input.
@@ -527,8 +520,7 @@ impl State {
             buf.len()
         };
         let before = self.parser.pos;
-        let stop = stop.max(before);
-        let ended = self.parser.parse(t, p, buf, stop, end);
+        let ended = self.parser.parse(t, p, buf, stop.max(before), end);
         let pos = self.parser.pos;
         self.update_check(&buf[before..pos]);
         self.total_in += (pos - before) as u64;
