@@ -7,6 +7,12 @@
 # Options:
 #   --base REV     also time REV (e.g. origin/main) as `base`, in the same
 #                  binary as the working tree, so each case is A/B'd
+#   --orders N     with --base, 2 (the default) builds each layout twice, the
+#                  second time with the two swapped: the working tree in the
+#                  base's place and the base in the working tree's. Where each
+#                  copy of the code lands moves small inputs by up to ~3% on
+#                  x86-64 even for identical code; averaging both orders
+#                  cancels that. 1 builds only the usual order
 #   --layouts N    average over the first N of 5 code layouts (default 5);
 #                  layout alone moves timings 5-10%
 #   --bmi2 MODE    on, off or both (default: both on x86-64, else on). `off`
@@ -15,7 +21,7 @@
 #   --cpu N        pin runs to CPU N with taskset (default: the last CPU;
 #                  `none` to not pin; ignored without taskset)
 #   --out DIR      results directory (default target/bench/results/<time>)
-#   --quick        a smoke run: 1 layout, BMI2 on, 3 rounds
+#   --quick        a smoke run: 1 layout, BMI2 on, 1 order, 3 rounds
 #
 # SUITE_OPTIONS go to every run (see `cargo run -p compare --release --bin
 # bench -- --help`), e.g. `--filter pack --modes oneshot`. Without a `--pack`
@@ -29,6 +35,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 base=""
 layouts=5
+orders=2
 arch=$(uname -m)
 if [ "$arch" = x86_64 ]; then bmi2=both; else bmi2=on; fi
 cpu=default
@@ -39,11 +46,12 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --base) base="$2"; shift 2 ;;
     --layouts) layouts="$2"; shift 2 ;;
+    --orders) orders="$2"; shift 2 ;;
     --bmi2) bmi2="$2"; shift 2 ;;
     --cpu) cpu="$2"; shift 2 ;;
     --out) out="$2"; shift 2 ;;
     --quick) quick=1; shift ;;
-    -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --) shift; suite+=("$@"); break ;;
     *) echo "unknown option $1 (see --help)" >&2; exit 1 ;;
   esac
@@ -51,6 +59,7 @@ done
 if [ "$quick" = 1 ]; then
   layouts=1
   bmi2=on
+  orders=1
   suite=(--rounds 3 "${suite[@]+"${suite[@]}"}")
 fi
 if [ "$arch" != x86_64 ] && [ "$bmi2" != on ]; then
@@ -68,6 +77,7 @@ layout_flags=(
   "-C llvm-args=-align-all-nofallthru-blocks=5"
 )
 [ "$layouts" -ge 1 ] && [ "$layouts" -le 5 ] || { echo "--layouts must be 1-5" >&2; exit 1; }
+[ "$orders" = 1 ] || [ "$orders" = 2 ] || { echo "--orders must be 1 or 2" >&2; exit 1; }
 
 bench="$root/target/bench"
 new_rev="$(git -C "$root" rev-parse --short HEAD)$(git -C "$root" diff --quiet HEAD -- . || echo +dirty)"
@@ -126,6 +136,28 @@ echo "$main" > "$runner/src/main.rs"
 # Start from the workspace's lockfile so dependency versions match.
 cp "$root/Cargo.lock" "$runner/Cargo.lock"
 
+# The swapped order: the same harness (this workspace's manifest and
+# crates/compare) around REV's library, and the working tree's library as
+# the base.
+[ -n "$base" ] || orders=1
+if [ "$orders" = 2 ]; then
+  swap="$bench/swap"
+  rm -rf "$swap" "$bench/runner-swap"
+  mkdir -p "$swap/tree/crates" "$swap/new"
+  cp "$root/Cargo.toml" "$swap/tree/"
+  git -C "$root" archive "$base_rev" README.md src | tar -x -C "$swap/tree"
+  (cd "$root/crates" && tar -c --exclude=target compare) | tar -x -C "$swap/tree/crates"
+  cp -R "$root/Cargo.toml" "$root/README.md" "$root/src" "$swap/new/"
+  find "$swap" -type f -exec touch {} +
+  sed -i.orig -e 's/^name = "sirocco"$/name = "sirocco_base"/' \
+    -e '/^members = /d' "$swap/new/Cargo.toml"
+  rm -f "$swap/new/Cargo.toml.orig"
+  cp -R "$runner" "$bench/runner-swap"
+  sed -i.orig -e 's#^compare = .*#compare = { path = "../swap/tree/crates/compare" }#' \
+    -e 's#^sirocco_base = .*#sirocco_base = { path = "../swap/new" }#' "$bench/runner-swap/Cargo.toml"
+  rm -f "$bench/runner-swap/Cargo.toml.orig"
+fi
+
 # Default pack: this repository's own objects.
 if ! printf '%s\n' "${suite[@]+"${suite[@]}"}" | grep -qx -- --pack; then
   mkdir -p "$bench/packs"
@@ -161,16 +193,30 @@ for b in "${bmi2_set[@]}"; do
     CARGO_TARGET_DIR="$bench/build/$id" RUSTFLAGS="$flags" \
       cargo build --quiet --release --manifest-path "$runner/Cargo.toml"
     builds+=("$id")
+    if [ "$orders" = 2 ]; then
+      echo "building $id-swapped" >&2
+      CARGO_TARGET_DIR="$bench/build/$id-swapped" RUSTFLAGS="$flags" \
+        cargo build --quiet --release --manifest-path "$bench/runner-swap/Cargo.toml"
+      builds+=("$id-swapped")
+    fi
   done
 done
 
 for id in "${builds[@]}"; do
   echo "running $id" >&2
   layout=${id%-bmi2*}
+  case "$id" in *-swapped) layout="$layout-swapped" ;; esac
   "${pin[@]+"${pin[@]}"}" "$bench/build/$id/release/sirocco-bench" run \
     --out "$out/$id.tsv" --meta "layout=$layout" --meta "new=$new_rev" \
     ${base_rev:+--meta "base=$base_rev"} --meta "cpu=$cpu_name" \
     "${suite[@]}" >/dev/null
+  case "$id" in
+    *-swapped)
+      # The working tree ran as `base` and REV as `sirocco`: name them back.
+      awk -F'\t' -v OFS='\t' '!/^#/ && $8 == "sirocco" { $8 = "base"; print; next }
+        !/^#/ && $8 == "base" { $8 = "sirocco"; print; next } { print }' \
+        "$out/$id.tsv" > "$out/$id.tsv.tmp" && mv "$out/$id.tsv.tmp" "$out/$id.tsv" ;;
+  esac
 done
 
 "$bench/build/${builds[0]}/release/sirocco-bench" summarize "$out"/*.tsv | tee "$out/summary.md"

@@ -6,7 +6,7 @@ different branches and machines can be compared. It lives in
 
 ```sh
 scripts/fetch-corpus.sh silesia canterbury logs   # once: real data in corpus/
-scripts/bench.sh --base origin/main               # the full A/B: ~40 min on a 4-core cloud VM
+scripts/bench.sh --base origin/main               # the full A/B: ~80 min on a 4-core cloud VM
 scripts/bench.sh --base origin/main --quick       # a smoke run while iterating: ~5 min
 ```
 
@@ -47,6 +47,14 @@ built in rather than left to each run:
 - **A/B in one binary.** `--base REV` copies REV's library into
   `target/bench/base`, renames its package `sirocco_base`, and links it next
   to the working tree's, so both run in the same process on the same data.
+- **Both orders.** Which of the two copies is the working tree's matters
+  too: on x86-64 cloud machines (an AMD EPYC and an Intel Xeon), identical
+  code ran up to 2-5% slower on small inputs in one place than the other,
+  whatever the layout. So each layout is built a second time with the two
+  swapped, REV's library inside the same harness in the working tree's
+  place and the working tree's as `base`, and the summary averages both
+  (`<layout>-swapped` in its list of layouts). `--orders 1` skips that.
+  On an Apple M4 the difference was under 0.5%.
 - **Code layouts.** Where the compiler places functions and loops moves
   timings by 5-10% on its own, even between identical code. Each run is built
   five times with different alignment flags (`default`, `align32`,
@@ -64,7 +72,8 @@ To see the noise floor on a machine, A/B the working tree against itself:
 `scripts/bench.sh --base HEAD`. Differences there are noise. On a 4-core
 cloud Xeon, groups of many cases averaged within ±1% (layout brackets about
 ±1%), while single-case rows such as a pack in order moved up to ±1% with
-brackets of ±3-5%.
+brackets of ±3-5%. With one order only, small-input groups on x86-64 were
+off by 2-5% even here.
 
 ## Reading the summary
 
@@ -108,8 +117,8 @@ libdeflate (whose loop still uses BMI2).
 
 ## Options
 
-`scripts/bench.sh --help` lists the script's options (`--layouts`, `--bmi2`,
-`--cpu`, `--out`, `--quick`). Options after `--` go to the suite itself:
+`scripts/bench.sh --help` lists the script's options (`--layouts`,
+`--orders`, `--bmi2`, `--cpu`, `--out`, `--quick`). Options after `--` go to the suite itself:
 
 ```text
 --rounds N         timing rounds (default 10)
