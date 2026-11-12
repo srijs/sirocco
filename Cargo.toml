@@ -49,7 +49,7 @@ repository = "https://github.com/srijs/sirocco"
 
 [workspace.dependencies]
 adler32furious = { version = "0.1.1", default-features = false }
-crc32fast = { version = "1.5", default-features = false }
+crc32fast = { version = "1.5.5", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
