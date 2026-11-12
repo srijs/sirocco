@@ -17,10 +17,10 @@ use compare::Format;
 use sirocco::deflate::{Encoder, Flush, Level};
 
 const USAGE: &str = "\
-usage: compress [OPTIONS] [DIR...]
+usage: compress [OPTIONS] [PATH...]
 
-Compresses every file under each DIR (default: each set in the corpus
-directory, and the synthetic corpus) as one group, at each level, with each
+Compresses each PATH, a file or every file under a directory (default: each
+set in the corpus directory, and the synthetic corpus), as one group, at each level, with each
 compressor, and prints sizes and speeds against zlib's.
 
 options:
@@ -242,7 +242,11 @@ fn groups(dirs: &[String]) -> Vec<Group> {
     let mut groups = Vec::new();
     let mut add = |name: String, dir: &std::path::Path| {
         let mut paths = Vec::new();
-        compare::walk(dir, &mut paths);
+        if dir.is_file() {
+            paths.push(dir.to_path_buf());
+        } else {
+            compare::walk(dir, &mut paths);
+        }
         paths.sort();
         let data = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
         groups.push(Group { name, data });

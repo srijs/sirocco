@@ -164,3 +164,17 @@ cargo run -p compare --release --bin compress -- --rounds 1 --impls sirocco,zlib
 ```
 
 which fails if any level of any group is more than 1% larger than zlib's.
+
+Sequencing data (BAM and VCF files, stored as BGZF: DEFLATE in independent
+blocks of up to 64 KiB) is a separate set, fetched only when named:
+
+```sh
+scripts/fetch-corpus.sh genomics      # 4 x 64 MiB range downloads, about 245 MB kept
+cargo run -p compare --release --bin compress -- --chunk 65280 corpus/genomics/*
+```
+
+Each file is a group of its own there, cut into pieces of a BGZF block's
+largest contents. The same rule holds, with one known exception: on the VCF
+text, levels 4 to 9 compress 3-13% larger than zlib's. They are not in the
+size check above. Once fetched, the set is also part of `corpus/`, so the
+decompression suite and a plain `compress` run include it.
