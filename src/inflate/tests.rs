@@ -400,6 +400,82 @@ fn an_error_ends_the_stream() {
 }
 
 #[test]
+fn decompress_whole_needs_room_for_all_of_the_output() {
+    let data: Vec<u8> = (0..70_000u32)
+        .map(|i| (i % 251) as u8 ^ (i / 1000) as u8)
+        .collect();
+    for format in FORMATS {
+        let mut c = reference_compress(format, 6, &data);
+        let stream_len = c.len();
+        c.extend_from_slice(b"next");
+        let mut d = Decoder::new(format);
+        let mut buf = vec![0; data.len() + 10];
+        for len in [data.len() + 10, data.len(), data.len() - 1, 1, 0] {
+            let result = d.decompress_whole(&c, &mut buf[..len]);
+            if len >= data.len() {
+                let l = result.unwrap();
+                assert_eq!(
+                    (l.compressed, l.decompressed),
+                    (stream_len as u64, data.len() as u64)
+                );
+                assert!(buf[..data.len()] == data[..], "{format:?} {len}");
+            } else {
+                assert_eq!(result, Err(Error::InsufficientSpace), "{format:?} {len}");
+            }
+        }
+        // Each failure left the decoder ready for a new stream.
+        let l = d.decompress_whole(&c, &mut buf).unwrap();
+        assert_eq!(l.decompressed, data.len() as u64, "{format:?}");
+    }
+}
+
+#[test]
+fn decompress_whole_starts_a_new_stream() {
+    let first = b"0123456789".repeat(10_000);
+    let second = reference_compress(Format::Gzip, 6, b"hello hello hello");
+    let mut d = Decoder::new(Format::Gzip);
+    // A stream left part way, then one with bad data.
+    let c = reference_compress(Format::Gzip, 9, &first);
+    let mut buf = vec![0; 1000];
+    let p = d.decompress(&c, &mut buf, true).unwrap();
+    assert!(!p.done && p.full);
+    let mut out = [0; 17];
+    let l = d.decompress_whole(&second, &mut out).unwrap();
+    assert_eq!(l.decompressed, 17);
+    assert_eq!(&out, b"hello hello hello");
+    let mut bad = second.clone();
+    bad[0] ^= 0xff;
+    assert_eq!(d.decompress_whole(&bad, &mut out), Err(Error::BadData));
+    assert_eq!(
+        d.decompress_whole(&second[..second.len() - 1], &mut out),
+        Err(Error::Truncated)
+    );
+    assert!(d.decompress_whole(&second, &mut out).is_ok());
+    assert_eq!(&out, b"hello hello hello");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(cases()))]
+
+    #[test]
+    fn decompress_whole_matches_one_shot(data in small_data(), level in levels(), slack in 0usize..3) {
+        for format in FORMATS {
+            let c = reference_compress(format, level, &data);
+            let mut d = Decoder::new(format);
+            // Short by one, then room to spare, on the same decoder.
+            if !data.is_empty() {
+                let mut short = vec![0; data.len() - 1];
+                prop_assert_eq!(d.decompress_whole(&c, &mut short), Err(Error::InsufficientSpace));
+            }
+            let mut buf = vec![0; data.len() + slack];
+            let l = d.decompress_whole(&c, &mut buf).unwrap();
+            prop_assert_eq!(l.compressed, c.len() as u64);
+            prop_assert_eq!(&buf[..l.decompressed as usize], &data[..]);
+        }
+    }
+}
+
+#[test]
 fn truncated_input_is_reported_as_such() {
     let data: Vec<u8> = (0..100_000u32).map(|i| (i * 7 % 253) as u8).collect();
     for format in FORMATS {

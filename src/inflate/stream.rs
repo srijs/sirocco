@@ -676,6 +676,48 @@ impl Decoder {
         })
     }
 
+    /// Decompresses one whole stream from `input` into `buf`, which must
+    /// hold all of its output: for many small streams of known size, like
+    /// BGZF blocks.
+    ///
+    /// Any stream in progress is abandoned first, and the decoder is ready
+    /// for the next stream after any result, so it can be reused without
+    /// [`reset`](Self::reset). Output longer than `buf` is
+    /// [`Error::InsufficientSpace`], where [`decompress`](Self::decompress)
+    /// would return a full buffer and wait for room. Bytes may follow the
+    /// stream; [`Lengths::compressed`] says where it ended.
+    ///
+    /// ```
+    /// use sirocco::{inflate::{Decoder, Error}, Format};
+    /// # let compressed = [0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x00];
+    /// let mut d = Decoder::new(Format::Deflate);
+    /// let mut out = [0; 17];
+    /// let n = d.decompress_whole(&compressed, &mut out)?;
+    /// assert_eq!((n.compressed, n.decompressed), (10, 17));
+    /// assert_eq!(out, *b"hello hello hello");
+    /// // Too short: an error, and the decoder is ready for the next stream.
+    /// assert_eq!(d.decompress_whole(&compressed, &mut out[..16]), Err(Error::InsufficientSpace));
+    /// assert!(d.decompress_whole(&compressed, &mut out).is_ok());
+    /// # Ok::<(), sirocco::inflate::Error>(())
+    /// ```
+    pub fn decompress_whole(&mut self, input: &[u8], buf: &mut [u8]) -> Result<Lengths, Error> {
+        self.reset();
+        let r = match self.decompress(input, buf, true) {
+            Ok(p) if p.done => Ok(Lengths {
+                compressed: p.consumed as u64,
+                decompressed: p.output.len() as u64,
+            }),
+            // With all of the input, only a full buffer leaves the stream
+            // unfinished.
+            Ok(_) | Err(Error::BufferFull) => Err(Error::InsufficientSpace),
+            Err(e) => Err(e),
+        };
+        if r.is_err() {
+            self.reset();
+        }
+        r
+    }
+
     /// Makes room in `buf` by moving the last 32 KiB of output to the front,
     /// which is all the history the stream needs. Returns the bytes dropped
     /// from the front: 0 if the output is no longer than that, or the stream
@@ -725,7 +767,7 @@ impl core::fmt::Debug for Scanner {
     }
 }
 
-/// A scanned stream's lengths.
+/// A stream's lengths, from [`Scanner`] or [`Decoder::decompress_whole`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Lengths {
