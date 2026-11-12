@@ -715,36 +715,49 @@ fn copy_match(output: &mut [u8], dst: usize, offset: usize, length: usize) {
             }
         }
     } else {
-        // A pattern of 2 to 7 bytes. Word by word, each load would wait for the
-        // store before it. So copy that way only until the first 16 bytes at
-        // the destination hold the pattern, then store those 16 on and on, as
-        // many whole periods further each time as fit in them (from `i`, a
-        // whole number of periods, up to which the destination is right).
-        // Short matches end here, after the rounds they always took.
-        loop {
-            copy_word!(0);
-            copy_word!(offset);
-            i += 2 * offset;
-            if i >= length {
-                return;
-            }
-            if i >= 16 {
-                break;
-            }
-        }
-        let pattern = *w[offset..].first_chunk::<16>().unwrap();
-        // `16 / offset * offset`, without a division.
-        const STEP: [u8; 8] = [16, 16, 16, 15, 16, 15, 12, 14];
-        let step = usize::from(STEP[offset & 7]);
+        // A pattern of 2 to 7 bytes. Copied word by word, each load would
+        // wait for the store before it, and loading the pattern back from
+        // the destination would wait on stores it can't be forwarded from.
+        // So the pattern is built in a register from one load of the source:
+        // its first `offset` bytes, repeated by a multiply with a one every
+        // `offset` bytes (they don't overlap, so nothing carries). Then it is
+        // stored on and on, as many whole periods further each time as fit
+        // in its 16 bytes.
+        let v = u64::from_le_bytes(*w.first_chunk().unwrap());
+        let period = u128::from(v & (u64::MAX >> (64 - 8 * offset)));
+        let pattern = period.wrapping_mul(REPEAT[offset & 7]).to_le_bytes();
+        let step = usize::from(PATTERN_STEP[offset & 7]);
         // One array for all the stores, so that they need no bounds checks:
         // `i < length <= MAX_MATCH_LEN`.
         let out: &mut [u8; MAX_MATCH_LEN + 16] = w[offset..].first_chunk_mut().unwrap();
-        while i < length {
+        loop {
             *out[i..].first_chunk_mut().unwrap() = pattern;
             i += step;
+            if i >= length {
+                break;
+            }
         }
     }
 }
+
+/// For a period of `p` bytes (2 to 7), a one at every `p`-th byte of 16.
+const REPEAT: [u128; 8] = {
+    let mut r = [0; 8];
+    let mut p = 2;
+    while p < 8 {
+        let mut k = 0;
+        while k < 16 {
+            r[p] |= 1 << (8 * k);
+            k += p;
+        }
+        p += 1;
+    }
+    r
+};
+
+/// For a period of `p` bytes (2 to 7), the whole periods in 16 bytes:
+/// `16 / p * p`, without a division.
+const PATTERN_STEP: [u8; 8] = [16, 16, 16, 15, 16, 15, 12, 14];
 
 /// Copies the `length`-byte match at `offset` back to `output[dst..]`
 /// without writing past it.
