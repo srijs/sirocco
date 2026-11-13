@@ -133,6 +133,12 @@ fn data() -> impl Strategy<Value = Vec<u8>> {
         // Compressible: short alphabet, long enough for several blocks and
         // matches that reach back across chunk boundaries.
         prop::collection::vec(0u8..4, 0..100_000),
+        // Random hex: mostly literals with short codewords, so their blocks
+        // get pair entries.
+        prop::collection::vec(
+            prop::sample::select(b"0123456789abcdef".to_vec()),
+            0..50_000
+        ),
         (any::<u8>(), 0usize..100_000).prop_map(|(b, n)| vec![b; n]),
         // Incompressible runs (stored blocks) each followed by a copy of
         // their end, which Huffman blocks refer back into.
@@ -1231,5 +1237,68 @@ fn a_window_sized_buffer_cannot_make_room() {
         let p = d.decompress(&c[consumed..], &mut buf, true).unwrap();
         assert_eq!(p.output, &data[WINDOW..=WINDOW], "{format:?}");
         assert_eq!(d.make_room(&mut buf), 1, "{format:?}");
+    }
+}
+
+/// Log lines (as JSON): mostly literals with short codewords, the data pair
+/// entries are for.
+fn log_lines(n: usize) -> Vec<u8> {
+    let mut x: u64 = 7;
+    let mut out = Vec::new();
+    for i in 0..n {
+        x = x
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        out.extend(
+            format!(
+                "{{\"t\":{},\"id\":\"{:016x}\",\"ms\":{}}}\n",
+                1_700_000_000 + i * 7,
+                x,
+                x % 997
+            )
+            .as_bytes(),
+        );
+    }
+    out
+}
+
+/// Streams whose blocks get pair entries decode the same in one call, in
+/// pieces, and into buffers that end anywhere near a few points, where pairs
+/// meet the end of the output in the tail loop.
+#[test]
+fn pair_entries_decode_in_every_way() {
+    let data = log_lines(3000);
+    for format in FORMATS {
+        for level in [1, 6, 9] {
+            let c = reference_compress(format, level, &data);
+            assert_eq!(
+                one_shot(format, &c, data.len()),
+                Ok((Some(data.clone()), c.len()))
+            );
+            for in_sizes in [&[1usize][..], &[7, 300], &[4096], &[usize::MAX >> 1]] {
+                for buf_len in [WINDOW + 1, 1 << 20] {
+                    let (out, consumed) = stream(format, &c, in_sizes, buf_len).unwrap();
+                    assert!(
+                        out == data,
+                        "{format:?} level {level} {in_sizes:?} {buf_len}"
+                    );
+                    assert_eq!(consumed, c.len());
+                }
+            }
+            for end in [data.len() / 3, data.len() / 2, data.len()] {
+                for len in end.saturating_sub(12)..=end {
+                    let mut buf = vec![0; len];
+                    let p = Decoder::new(format).decompress(&c, &mut buf, true).unwrap();
+                    if len < data.len() {
+                        assert!(
+                            p.full && p.output == &data[..len],
+                            "{format:?} level {level} len {len}"
+                        );
+                    } else {
+                        assert!(p.done);
+                    }
+                }
+            }
+        }
     }
 }

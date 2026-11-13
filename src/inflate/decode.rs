@@ -440,7 +440,15 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
     } = *s;
     let mut saved_bitbuf: BitBuf;
     let mut entry: u32;
-    let litlen_tablemask = t.litlen_mask();
+    // The main variant runs only on tables of the full width (see
+    // `Tables::widen_litlen`), so its mask is a constant, which spares it a
+    // register: without that, x86-64 spilled more in the loop. The tail
+    // variant takes the table's own.
+    let litlen_tablemask = if TAIL {
+        t.litlen_mask()
+    } else {
+        bitmask(LITLEN_TABLEBITS) as usize
+    };
     // The input not yet refilled from.
     let mut rest = &input[in_pos..];
 
@@ -478,6 +486,10 @@ fn fastloop<const WRITE: bool, const TAIL: bool>(t: &Tables, s: &mut FastState<'
         if rest.len() < FASTLOOP_IN_WINDOW || out_pos >= out_end {
             break 'done FastExit::Margin;
         }
+        debug_assert!(
+            TAIL || t.litlen_mask() == litlen_tablemask,
+            "a narrow table in the main fastloop"
+        );
         refill!();
         entry = t.litlen[bits.buf & litlen_tablemask];
         loop {
@@ -1203,6 +1215,14 @@ fn decompress<const RESUMABLE: bool, const WRITE: bool>(
         }
 
         'block_done: {
+            // The main fastloop's table must be of the full width. A
+            // narrower one (a small code's) is widened only here, so that
+            // small streams, which never get this far, don't pay for it.
+            if !(WRITE && out_len - c.out_pos < FASTLOOP_MAX_BYTES_WRITTEN)
+                && input.len() - c.in_pos >= FASTLOOP_IN_WINDOW
+            {
+                t.widen_litlen();
+            }
             // The fastloop, while the input and output are far from their
             // ends. Every variant of this function calls the same compiled
             // copy of it.

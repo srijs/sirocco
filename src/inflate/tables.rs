@@ -27,14 +27,13 @@ const MAX_LENS_OVERRUN: usize = 137;
 /// computed with zlib's `enough` utility.
 pub(super) const PRECODE_TABLEBITS: u32 = 7;
 const PRECODE_ENOUGH: usize = 128;
-/// The litlen main table's bits with pair entries, which then fit more often:
-/// also the most it has.
-pub(super) const LITLEN_TABLEBITS: u32 = 12;
-/// The litlen main table's bits without pairs (as libdeflate's), where
-/// building the wider table wouldn't pay.
-pub(super) const LITLEN_TABLEBITS_PLAIN: u32 = 11;
+/// The litlen main table's most bits, with pair entries or without (as
+/// libdeflate's). 12 would fit more pairs, but its 16 KiB table and the 32
+/// KiB window don't fit a 32 KiB L1 data cache together: on such a CPU (an
+/// AMD EPYC) the decode missed it twice as often.
+pub(super) const LITLEN_TABLEBITS: u32 = 11;
 // A bound rather than zlib's exact `enough`: the main table, and at most one
-// subtable of at most 2^(15 - 12) entries per symbol.
+// subtable of at most 2^(15 - LITLEN_TABLEBITS) entries per symbol.
 const LITLEN_ENOUGH: usize =
     (1 << LITLEN_TABLEBITS) + NUM_LITLEN_SYMS * (1 << (MAX_LITLEN_CODEWORD_LEN - LITLEN_TABLEBITS));
 pub(super) const OFFSET_TABLEBITS: u32 = 8;
@@ -543,12 +542,25 @@ pub(super) struct Tables {
     /// Whether `litlen` and `offset` hold the static codes.
     static_loaded: bool,
     /// The litlen main table's bits: `LITLEN_TABLEBITS` with pair entries,
-    /// at most `LITLEN_TABLEBITS_PLAIN` without (as many as the longest
-    /// codeword needs).
+    /// at most that without (as many as the longest codeword needs, until
+    /// [`widen_litlen`](Self::widen_litlen)).
     litlen_bits: u32,
 }
 
 impl Tables {
+    /// Widens the litlen main table to `LITLEN_TABLEBITS` bits, as the main
+    /// fastloop needs, by doubling. Only shrunk tables (of complete codes,
+    /// see `build_decode_table`) and the static one are narrower, and they
+    /// have no subtables to overwrite.
+    #[inline(always)]
+    pub(super) fn widen_litlen(&mut self) {
+        while self.litlen_bits < LITLEN_TABLEBITS {
+            let n = 1 << self.litlen_bits;
+            self.litlen.copy_within(..n, n);
+            self.litlen_bits += 1;
+        }
+    }
+
     /// The litlen main table's index mask. Its bits never exceed the widest
     /// table's, and saying so lets the compiler drop the bounds check on
     /// each lookup.
@@ -566,7 +578,7 @@ impl Tables {
             offset: [0; OFFSET_ENOUGH],
             sorted_syms: [0; MAX_NUM_SYMS],
             static_loaded: false,
-            litlen_bits: LITLEN_TABLEBITS_PLAIN,
+            litlen_bits: LITLEN_TABLEBITS,
         }
     }
 
@@ -644,26 +656,20 @@ fn build_precode_table(
     .is_some()
 }
 
-/// Builds the litlen table, with pair entries if `PAIRS` (and a main table
-/// of `LITLEN_TABLEBITS` bits, not `LITLEN_TABLEBITS_PLAIN`), returning its
-/// main table's bits. Without pairs, that is only as many as the longest
-/// codeword needs.
+/// Builds the litlen table, with pair entries if `PAIRS`, returning its main
+/// table's bits: `LITLEN_TABLEBITS`, or without pairs only as many as the
+/// longest codeword needs.
 #[inline(never)]
 fn build_litlen_table<const PAIRS: bool>(
     table: &mut [u32; LITLEN_ENOUGH],
     lens: &[u8],
     sorted_syms: &mut [u16; MAX_NUM_SYMS],
 ) -> Option<u32> {
-    let table_bits = if PAIRS {
-        LITLEN_TABLEBITS
-    } else {
-        LITLEN_TABLEBITS_PLAIN
-    };
     build_decode_table::<PAIRS>(
         table,
         lens,
         &LITLEN_DECODE_RESULTS,
-        table_bits,
+        LITLEN_TABLEBITS,
         MAX_LITLEN_CODEWORD_LEN,
         sorted_syms,
         Some(286),
