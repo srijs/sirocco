@@ -27,10 +27,7 @@ const MAX_LENS_OVERRUN: usize = 137;
 /// computed with zlib's `enough` utility.
 pub(super) const PRECODE_TABLEBITS: u32 = 7;
 const PRECODE_ENOUGH: usize = 128;
-/// The litlen main table's most bits, with pair entries or without (as
-/// libdeflate's). 12 would fit more pairs, but its 16 KiB table and the 32
-/// KiB window don't fit a 32 KiB L1 data cache together: on such a CPU (an
-/// AMD EPYC) the decode missed it twice as often.
+/// The litlen main table's most bits (as libdeflate's).
 pub(super) const LITLEN_TABLEBITS: u32 = 11;
 // A bound rather than zlib's exact `enough`: the main table, and at most one
 // subtable of at most 2^(15 - LITLEN_TABLEBITS) entries per symbol.
@@ -42,12 +39,6 @@ const OFFSET_ENOUGH: usize = 402;
 /// Set on literal entries in the litlen table. The high bit, so testing it is
 /// a sign test on most CPUs.
 pub(super) const HUFFDEC_LITERAL: u32 = 0x8000_0000;
-/// Set, with `HUFFDEC_LITERAL`, on an entry for two literals whose codes fit
-/// the main table together: one lookup decodes both.
-pub(super) const HUFFDEC_PAIR: u32 = 0x4000_0000;
-/// Where a pair entry keeps its first literal's codeword length, for when
-/// only that one fits in the output.
-pub(super) const PAIR_FIRST_LEN_SHIFT: u32 = 24;
 /// Set when either `HUFFDEC_SUBTABLE_POINTER` or `HUFFDEC_END_OF_BLOCK` is.
 pub(super) const HUFFDEC_EXCEPTIONAL: u32 = 0x0000_8000;
 pub(super) const HUFFDEC_SUBTABLE_POINTER: u32 = 0x0000_4000;
@@ -88,11 +79,8 @@ static PRECODE_DECODE_RESULTS: [u32; NUM_PRECODE_SYMS] = {
 /// ```text
 /// Literals:
 ///     Bit 31:     1 (HUFFDEC_LITERAL)
-///     Bit 30:     1 for a pair of literals (HUFFDEC_PAIR), else 0
-///     Bit 27-24:  a pair's first codeword length, else 0
-///     Bit 23-16:  a pair's second literal, else 0
-///     Bit 15-8:   literal value (a pair's first)
-///     Bit 3-0:    remaining codeword length (a pair's two together)
+///     Bit 15-8:   literal value
+///     Bit 3-0:    remaining codeword length
 /// Lengths:
 ///     Bit 31:     0
 ///     Bit 24-16:  length base value
@@ -216,15 +204,14 @@ const fn make_decode_table_entry(decode_results: &[u32], sym: usize, len: u32) -
 /// the invalid symbol that the codewords an incomplete code lacks decode to,
 /// or `None` if the code must be complete.
 ///
-/// With `PAIRS` (for the litlen table), the main table also gets an entry for
-/// each two literals whose codewords fit it together. With `shrink`, a
+/// With `shrink`, a
 /// complete code whose longest codeword is shorter than `table_bits` gets a
 /// main table only that wide, which the caller must then index with as many
 /// bits.
 // One more argument than clippy likes, but a const generic for `shrink`
 // would compile a copy of this for the litlen table alone.
 #[allow(clippy::too_many_arguments)]
-fn build_decode_table<const PAIRS: bool>(
+fn build_decode_table(
     decode_table: &mut [u32],
     lens: &[u8],
     decode_results: &[u32],
@@ -349,29 +336,20 @@ fn build_decode_table<const PAIRS: bool>(
         }
         len += 1;
     }
-    // With `PAIRS`, the literals' bit-reversed codewords, by length, for the
-    // pair entries: each pair goes in once the table is as wide as its two
-    // codes together, and the doublings after copy it to all its slots.
-    let mut lits = Lits::new();
     let mut cur_table_end: u32 = 1 << len;
     while len <= table_bits {
         loop {
             let sym = sorted[si] as usize;
             decode_table[codeword as usize] = make_decode_table_entry(decode_results, sym, len);
             si += 1;
-            if PAIRS && sym < 256 {
-                lits.push(codeword, sym);
-            }
 
             if codeword == cur_table_end - 1 {
                 // Last codeword (all 1s).
-                lits.end_len::<PAIRS>(decode_table, len);
                 while len < table_bits {
                     let end = cur_table_end as usize;
                     decode_table.copy_within(..end, end);
                     cur_table_end <<= 1;
                     len += 1;
-                    lits.end_len::<PAIRS>(decode_table, len);
                 }
                 return Some(table_bits);
             }
@@ -387,7 +365,6 @@ fn build_decode_table<const PAIRS: bool>(
                 break;
             }
         }
-        lits.end_len::<PAIRS>(decode_table, len);
 
         // Advance to the next codeword length.
         loop {
@@ -400,10 +377,6 @@ fn build_decode_table<const PAIRS: bool>(
             count = len_counts[len as usize];
             if count != 0 {
                 break;
-            }
-            // A length with no codewords still gets its pairs.
-            if len <= table_bits {
-                lits.end_len::<PAIRS>(decode_table, len);
             }
         }
     }
@@ -462,63 +435,6 @@ fn build_decode_table<const PAIRS: bool>(
     }
 }
 
-/// The literals among a code's codewords of at most the main table's bits, in
-/// the order the table is filled, by length: their bit-reversed codewords,
-/// for the pair entries.
-struct Lits {
-    codewords: [(u16, u8); 256],
-    n: usize,
-    /// `end[len]`: how many have codewords of at most `len` bits.
-    end: [usize; MAX_CODEWORD_LEN + 1],
-}
-
-impl Lits {
-    #[inline(always)]
-    fn new() -> Self {
-        Lits {
-            codewords: [(0, 0); 256],
-            n: 0,
-            end: [0; MAX_CODEWORD_LEN + 1],
-        }
-    }
-
-    #[inline(always)]
-    fn push(&mut self, codeword: u32, sym: usize) {
-        self.codewords[self.n & 255] = (codeword as u16, sym as u8);
-        self.n += 1;
-    }
-
-    /// Ends the codewords of `len` bits, the table now being `2^len` entries
-    /// wide. With `PAIRS`, writes each pair of literals whose codewords take
-    /// `len` bits together, once, at the first's codeword followed by the
-    /// second's. Its slot held a copy of the first literal's entry, which the
-    /// pair's decodes as well: the code is prefix-free, so no other codeword
-    /// starts there.
-    #[inline(always)]
-    fn end_len<const PAIRS: bool>(&mut self, table: &mut [u32], len: u32) {
-        self.end[len as usize & 15] = self.n;
-        if !PAIRS {
-            return;
-        }
-        for a in 1..len {
-            let b = len - a;
-            let firsts = &self.codewords[self.end[(a - 1) as usize]..self.end[a as usize]];
-            let seconds = &self.codewords[self.end[(b - 1) as usize]..self.end[b as usize]];
-            for &(rev1, sym1) in firsts {
-                let e = HUFFDEC_LITERAL
-                    | HUFFDEC_PAIR
-                    | a << PAIR_FIRST_LEN_SHIFT
-                    | u32::from(sym1) << 8
-                    | len;
-                for &(rev2, sym2) in seconds {
-                    table[(u32::from(rev1) | u32::from(rev2) << a) as usize] =
-                        e | u32::from(sym2) << 16;
-                }
-            }
-        }
-    }
-}
-
 // `ilog2` would add a zero check; callers never pass zero.
 #[allow(clippy::manual_ilog2)]
 #[inline(always)]
@@ -541,9 +457,9 @@ pub(super) struct Tables {
     sorted_syms: [u16; MAX_NUM_SYMS],
     /// Whether `litlen` and `offset` hold the static codes.
     static_loaded: bool,
-    /// The litlen main table's bits: `LITLEN_TABLEBITS` with pair entries,
-    /// at most that without (as many as the longest codeword needs, until
-    /// [`widen_litlen`](Self::widen_litlen)).
+    /// The litlen main table's bits: at most `LITLEN_TABLEBITS`, as many as
+    /// the longest codeword needs, until
+    /// [`widen_litlen`](Self::widen_litlen).
     litlen_bits: u32,
 }
 
@@ -593,15 +509,10 @@ impl Tables {
     }
 
     /// Builds the litlen and offset tables from the first `num_litlen_syms`
-    /// and the next `num_offset_syms` of `lens`, the litlen table with pair
-    /// entries if `pairs`. Returns whether they make valid codes.
+    /// and the next `num_offset_syms` of `lens`. Returns whether they make
+    /// valid codes.
     #[inline(always)]
-    pub(super) fn build_dynamic(
-        &mut self,
-        num_litlen_syms: usize,
-        num_offset_syms: usize,
-        pairs: bool,
-    ) -> bool {
+    pub(super) fn build_dynamic(&mut self, num_litlen_syms: usize, num_offset_syms: usize) -> bool {
         self.static_loaded = false;
         let (litlen_lens, offset_lens) =
             self.lens[..num_litlen_syms + num_offset_syms].split_at(num_litlen_syms);
@@ -609,12 +520,7 @@ impl Tables {
         if !build_offset_table(&mut self.offset, offset_lens, sorted) {
             return false;
         }
-        let bits = if pairs {
-            build_litlen_table::<true>(table, litlen_lens, sorted)
-        } else {
-            build_litlen_table::<false>(table, litlen_lens, sorted)
-        };
-        let Some(bits) = bits else {
+        let Some(bits) = build_litlen_table(table, litlen_lens, sorted) else {
             return false;
         };
         self.litlen_bits = bits;
@@ -643,7 +549,7 @@ fn build_precode_table(
     lens: &[u8; NUM_PRECODE_SYMS],
     sorted_syms: &mut [u16; MAX_NUM_SYMS],
 ) -> bool {
-    build_decode_table::<false>(
+    build_decode_table(
         table,
         lens,
         &PRECODE_DECODE_RESULTS,
@@ -656,16 +562,15 @@ fn build_precode_table(
     .is_some()
 }
 
-/// Builds the litlen table, with pair entries if `PAIRS`, returning its main
-/// table's bits: `LITLEN_TABLEBITS`, or without pairs only as many as the
-/// longest codeword needs.
+/// Builds the litlen table, returning its main table's bits:
+/// `LITLEN_TABLEBITS`, or as many as the longest codeword needs.
 #[inline(never)]
-fn build_litlen_table<const PAIRS: bool>(
+fn build_litlen_table(
     table: &mut [u32; LITLEN_ENOUGH],
     lens: &[u8],
     sorted_syms: &mut [u16; MAX_NUM_SYMS],
 ) -> Option<u32> {
-    build_decode_table::<PAIRS>(
+    build_decode_table(
         table,
         lens,
         &LITLEN_DECODE_RESULTS,
@@ -673,7 +578,7 @@ fn build_litlen_table<const PAIRS: bool>(
         MAX_LITLEN_CODEWORD_LEN,
         sorted_syms,
         Some(286),
-        !PAIRS,
+        true,
     )
 }
 
@@ -683,7 +588,7 @@ fn build_offset_table(
     lens: &[u8],
     sorted_syms: &mut [u16; MAX_NUM_SYMS],
 ) -> bool {
-    build_decode_table::<false>(
+    build_decode_table(
         table,
         lens,
         &OFFSET_DECODE_RESULTS,
@@ -782,7 +687,7 @@ mod tests {
     fn static_tables_match_built_tables() {
         let mut t = Tables::new();
         t.lens[..STATIC_LENS.len()].copy_from_slice(&STATIC_LENS);
-        assert!(t.build_dynamic(NUM_LITLEN_SYMS, NUM_OFFSET_SYMS, false));
+        assert!(t.build_dynamic(NUM_LITLEN_SYMS, NUM_OFFSET_SYMS));
         assert_eq!(t.litlen_bits, STATIC_LITLEN_TABLEBITS);
         assert_eq!(t.litlen[..STATIC_LITLEN_TABLE.len()], STATIC_LITLEN_TABLE);
         assert_eq!(t.offset[..STATIC_OFFSET_TABLE.len()], STATIC_OFFSET_TABLE);

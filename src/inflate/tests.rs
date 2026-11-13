@@ -133,8 +133,7 @@ fn data() -> impl Strategy<Value = Vec<u8>> {
         // Compressible: short alphabet, long enough for several blocks and
         // matches that reach back across chunk boundaries.
         prop::collection::vec(0u8..4, 0..100_000),
-        // Random hex: mostly literals with short codewords, so their blocks
-        // get pair entries.
+        // Random hex: mostly literals, with short codewords.
         prop::collection::vec(
             prop::sample::select(b"0123456789abcdef".to_vec()),
             0..50_000
@@ -1240,8 +1239,7 @@ fn a_window_sized_buffer_cannot_make_room() {
     }
 }
 
-/// Log lines (as JSON): mostly literals with short codewords, the data pair
-/// entries are for.
+/// Log lines (as JSON): mostly literals, with short codewords.
 fn log_lines(n: usize) -> Vec<u8> {
     let mut x: u64 = 7;
     let mut out = Vec::new();
@@ -1262,11 +1260,11 @@ fn log_lines(n: usize) -> Vec<u8> {
     out
 }
 
-/// Streams whose blocks get pair entries decode the same in one call, in
-/// pieces, and into buffers that end anywhere near a few points, where pairs
-/// meet the end of the output in the tail loop.
+/// Literal-heavy streams decode the same in one call, in pieces, and into
+/// buffers that end anywhere near a few points, where runs of literals meet
+/// the end of the output in the tail loop.
 #[test]
-fn pair_entries_decode_in_every_way() {
+fn literal_runs_decode_in_every_way() {
     let data = log_lines(3000);
     for format in FORMATS {
         for level in [1, 6, 9] {

@@ -61,14 +61,14 @@ fn truncated_streams_match_zlib() {
     }
 }
 
-/// A literal-heavy stream long enough that its tables get literal pairs, with
-/// the output a few bytes short and the input cut short, and both: somewhere
-/// in there a pair meets exactly one byte of room, in a whole stream and in a
-/// truncated one, and the outcome (and its error) must still be zlib's.
+/// A literal-heavy stream, with the output a few bytes short and the input
+/// cut short, and both: somewhere in there a run of literals meets the end of
+/// the room, in a whole stream and in a truncated one, and the outcome (and
+/// its error) must still be zlib's.
 #[test]
-fn pairs_at_the_ends_match_zlib() {
+fn literal_runs_at_the_ends_match_zlib() {
     // 64 KiB over a skewed alphabet, as quality strings: short literal codes,
-    // and about 3:1, so that pairs are built.
+    // and about 3:1.
     let mut x = 0x9E37_79B9u32;
     let data: Vec<u8> = (0..65_536)
         .map(|_| {
