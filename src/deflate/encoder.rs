@@ -388,11 +388,10 @@ impl State {
         if !matches!(self.stage, Stage::Body | Stage::Marker { .. }) || pos > buf.len() {
             return 0;
         }
-        let pinned = if p.open || !self.w.is_idle() {
-            p.block.start
-        } else {
-            pos
-        };
+        // Between blocks, the start is stale and can lie more than a window
+        // back.
+        let in_block = p.open || !self.w.is_idle();
+        let pinned = if in_block { p.block.start } else { pos };
         let drop = pos.saturating_sub(WINDOW).min(pinned);
         if drop == 0 {
             return 0;
@@ -403,7 +402,9 @@ impl State {
         }
         buf.copy_within(drop.., 0);
         p.pos -= drop;
-        p.block.start -= drop;
+        if in_block {
+            p.block.start -= drop;
+        }
         self.flushed_at = self.flushed_at.and_then(|f| f.checked_sub(drop));
         drop
     }

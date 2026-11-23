@@ -279,6 +279,28 @@ fn repeated_sync_flushes_add_nothing() {
     assert_eq!(p.output.len(), 0);
 }
 
+/// `make_room` after every call, with one-byte outputs: some call ends as a
+/// block longer than the window finishes writing, with no block open yet,
+/// and `make_room` must not count from that block's start.
+#[test]
+fn make_room_between_blocks() {
+    let data = sample(200_000, 11);
+    for level in 0..=9 {
+        let mut e = Encoder::new(Format::Deflate, Level::new(level));
+        let mut buf = data.clone();
+        let (mut len, mut out, mut byte) = (data.len(), Vec::new(), [0]);
+        loop {
+            let p = e.compress(&buf[..len], &mut byte, Flush::Finish);
+            out.extend_from_slice(p.output);
+            if p.done {
+                break;
+            }
+            len -= e.make_room(&mut buf[..len]);
+        }
+        assert_eq!(decompress(Format::Deflate, &out), data, "level {level}");
+    }
+}
+
 #[test]
 fn one_byte_outputs() {
     let data = sample(50_000, 3);
