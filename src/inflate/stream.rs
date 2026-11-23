@@ -507,7 +507,10 @@ macro_rules! core_methods {
 ///
 /// With all of the input and room for all of the output,
 /// [`decompress`](Self::decompress) decodes in one call. Otherwise each call
-/// carries on where the last stopped.
+/// carries on where the last stopped. One shot and streaming are the same
+/// call: with all of the input, a stream that is not
+/// [done](Progress::done) ran out of room. Make room and call again, or call
+/// [`reset`](Self::reset) to give up on it.
 ///
 /// It holds about 14 KiB inline and never allocates. Reuse it across
 /// streams (box it if stack is tight); once a stream is done, the next call
@@ -642,8 +645,10 @@ impl Decoder {
     /// [`Error::Truncated`]. `buf` must start with what the last call left
     /// in it (see [the buffer](Self#the-buffer)).
     ///
-    /// An error in the data ends the stream. [`Error::BufferFull`] doesn't:
-    /// make room and call again.
+    /// An error in the data ends the stream. [`Error::BufferFull`] and
+    /// [`Progress::full`] don't: make room and call again, or call
+    /// [`reset`](Self::reset) to give up on the stream. Otherwise the next
+    /// call continues it, even with other input.
     pub fn decompress<'b>(
         &mut self,
         input: &[u8],

@@ -83,12 +83,24 @@ buffer you own, takes input in one piece or many, and never allocates:
 use sirocco::{inflate::Decoder, Format};
 
 # let compressed = [0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x00];
+# let streams = [&compressed[..], &compressed[..]];
 let mut d = Decoder::new(Format::Deflate);
 let mut out = [0; 17];
-let p = d.decompress(&compressed, &mut out, true).unwrap();
-assert!(p.done);
-assert_eq!(p.output, b"hello hello hello");
+for input in streams {
+    let p = d.decompress(input, &mut out, true).unwrap();
+    if !p.done {
+        // The output does not fit. Without reset(), the next call would
+        // continue this stream.
+        d.reset();
+        continue;
+    }
+    assert_eq!(p.output, b"hello hello hello");
+}
 ```
+
+With all of its input, a stream that is not done ran out of room, and is
+still open. Make room and call again to stream it, or call `reset()`
+before you move on to the next one.
 
 `deflate::Encoder` is the same for compression: it reads from a buffer you
 own, writes into another, and allocates only its tables, which you can give
