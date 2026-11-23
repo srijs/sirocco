@@ -36,7 +36,7 @@ and Adler-32 from [adler32furious](https://crates.io/crates/adler32furious).
 
 ```toml
 [dependencies]
-sirocco = "0.3"
+sirocco = "0.4"
 ```
 
 ```rust
