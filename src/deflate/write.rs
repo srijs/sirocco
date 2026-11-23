@@ -200,6 +200,20 @@ impl Writer {
         self.emit = Emit::Staged { body_next: false };
     }
 
+    /// Stages an empty block with the static codes, 10 bits: a partial
+    /// flush's marker. It doesn't end on a byte boundary, but carries the
+    /// block before it into whole bytes.
+    pub(super) fn stage_partial_marker(&mut self) {
+        self.stage_start();
+        self.stage_put(0, 1);
+        self.stage_put(1, 2);
+        self.stage_put(
+            STATIC_CODES.litlen[END_OF_BLOCK],
+            u32::from(STATIC_CODES.litlen_lens[END_OF_BLOCK]),
+        );
+        self.emit = Emit::Staged { body_next: false };
+    }
+
     /// Starts writing a stored block of the `len` bytes from `block.start`.
     pub(super) fn begin_stored(&mut self, len: usize, last: bool) {
         debug_assert!(len > 0);

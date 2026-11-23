@@ -16,8 +16,8 @@ Fast DEFLATE, zlib and gzip compression and decompression in pure Rust.
 - **One-shot or streaming, with one API.** `inflate::Decoder` decompresses
   a whole buffer in one call, or input in pieces of any size into a buffer
   you own, at nearly the same speed; `deflate::Encoder` likewise
-  compresses from a buffer you own, with zlib's sync, full and finish
-  flushes. `inflate::Reader` reads from any `BufRead`, and
+  compresses from a buffer you own, with zlib's partial, sync, full and
+  finish flushes. `inflate::Reader` reads from any `BufRead`, and
   `deflate::Writer` writes to any `Write`.
 - **Scanning.** `inflate::Scanner` finds where a stream ends and how long
   its output is without writing it, for example to walk a git pack.
@@ -125,9 +125,9 @@ The minimum supported Rust version is 1.89.
 ### Limitations
 
 - The encoder has zlib's levels 0 to 9 and flushes (`Z_NO_FLUSH`,
-  `Z_SYNC_FLUSH`, `Z_FULL_FLUSH`, `Z_FINISH`), but not zlib's strategies
-  (`Z_FILTERED`, `Z_HUFFMAN_ONLY`, `Z_RLE`, `Z_FIXED`), preset dictionaries,
-  or gzip header fields (name, comment, time).
+  `Z_PARTIAL_FLUSH`, `Z_SYNC_FLUSH`, `Z_FULL_FLUSH`, `Z_FINISH`), but not
+  zlib's strategies (`Z_FILTERED`, `Z_HUFFMAN_ONLY`, `Z_RLE`, `Z_FIXED`),
+  preset dictionaries, or gzip header fields (name, comment, time).
 - zlib streams with a preset dictionary (`FDICT`) are rejected, with
   `inflate::Error::PresetDictionary`.
 - `sirocco::decompress` reads every member of a multi-member gzip file (as

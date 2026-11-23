@@ -141,12 +141,12 @@ pub struct Step {
     pub out_len: usize,
 }
 
-/// A streamed compression's output, and where its sync and full flushes
-/// were: (input so far, output so far, full).
+/// A streamed compression's output, and where its partial, sync and full
+/// flushes were: (input so far, output so far, flush).
 #[derive(Debug)]
 pub struct Streamed {
     pub compressed: Vec<u8>,
-    pub flushes: Vec<(usize, usize, bool)>,
+    pub flushes: Vec<(usize, usize, Flush)>,
 }
 
 /// Compresses `data` with sirocco through a `buf_len`-byte buffer (at
@@ -200,10 +200,9 @@ pub fn sirocco_compress_stream(
             step.flush,
             step.out_len,
         );
-        if matches!(step.flush, Flush::Sync | Flush::Full) {
+        if matches!(step.flush, Flush::Partial | Flush::Sync | Flush::Full) {
             assert_eq!(e.total_in(), fed as u64, "a flush leaves no input behind");
-            let full = step.flush == Flush::Full;
-            s.flushes.push((fed, s.compressed.len(), full));
+            s.flushes.push((fed, s.compressed.len(), step.flush));
         }
         if fed == data.len() || steps.iter().all(|s| s.add == 0) {
             break;
@@ -217,16 +216,17 @@ pub fn sirocco_compress_stream(
 }
 
 /// Checks a streamed compression of `data`: the whole stream with
-/// [`check_round_trip`], and with zlib that each sync or full flush ends
-/// with `00 00 FF FF` and makes all of the input so far decompressible, and
-/// that raw DEFLATE after a full flush decompresses alone.
+/// [`check_round_trip`], and with zlib that each flush makes all of the
+/// input so far decompressible, that each sync or full flush ends with
+/// `00 00 FF FF`, and that raw DEFLATE after a full flush decompresses
+/// alone.
 #[track_caller]
 pub fn check_stream(format: Format, s: &Streamed, data: &[u8], what: &dyn std::fmt::Display) {
     check_round_trip(format, &s.compressed, data, what);
-    for &(fed, at, full) in &s.flushes {
+    for &(fed, at, flush) in &s.flushes {
         let c = &s.compressed[..at];
         assert!(
-            c.ends_with(&[0, 0, 0xFF, 0xFF]),
+            flush == Flush::Partial || c.ends_with(&[0, 0, 0xFF, 0xFF]),
             "no flush marker at {at}: {what}"
         );
         match zlib_decompress_prefix(format, c, data.len()) {
@@ -236,7 +236,7 @@ pub fn check_stream(format: Format, s: &Streamed, data: &[u8], what: &dyn std::f
             ),
             Err(e) => panic!("{e} to a flush: {what}"),
         }
-        if full && format == Format::Deflate {
+        if flush == Flush::Full && format == Format::Deflate {
             let rest = zlib_decompress(format, &s.compressed[at..], data.len());
             assert!(
                 rest.is_ok_and(|r| r == data[fed..]),

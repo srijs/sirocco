@@ -18,7 +18,8 @@ enum Stage {
     Header,
     /// Compressing.
     Body,
-    /// A sync or full flush's block is written: its marker is next.
+    /// A partial, sync or full flush's block is written: its marker is
+    /// next.
     Marker {
         flush: Flush,
     },
@@ -141,9 +142,10 @@ struct State {
     check: u32,
     total_in: u64,
     total_out: u64,
-    /// The position and kind of the last sync or full flush. As in zlib,
-    /// another flush there adds nothing unless it's a stronger kind: a full
-    /// flush after a sync one still forgets the data before it.
+    /// The position and kind of the last partial, sync or full flush. As in
+    /// zlib, another flush there adds nothing unless it's a stronger kind: a
+    /// sync flush after a partial one still ends on a byte boundary, and a
+    /// full flush after a sync one still forgets the data before it.
     flushed_at: Option<(usize, Flush)>,
 }
 
@@ -434,8 +436,11 @@ impl State {
                     }
                 }
                 Stage::Marker { flush: kind } => {
-                    self.w.stage_marker(false);
                     let pos = self.parser.pos;
+                    match kind {
+                        Flush::Partial => self.w.stage_partial_marker(),
+                        _ => self.w.stage_marker(false),
+                    }
                     if kind == Flush::Full {
                         self.reset_matches(t, pos, None);
                     }
@@ -534,7 +539,7 @@ impl State {
         }
         match flush {
             Flush::None => false,
-            Flush::Sync | Flush::Full => {
+            Flush::Partial | Flush::Sync | Flush::Full => {
                 if matches!(self.flushed_at, Some((at, last)) if at == pos && strength(flush) <= strength(last))
                 {
                     return false;
@@ -584,9 +589,10 @@ impl State {
 const fn strength(flush: Flush) -> u8 {
     match flush {
         Flush::None => 0,
-        Flush::Sync => 1,
-        Flush::Full => 2,
-        Flush::Finish => 3,
+        Flush::Partial => 1,
+        Flush::Sync => 2,
+        Flush::Full => 3,
+        Flush::Finish => 4,
     }
 }
 

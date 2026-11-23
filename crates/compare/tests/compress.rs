@@ -90,6 +90,7 @@ fn big_data() -> impl Strategy<Value = Vec<u8>> {
 fn steps() -> impl Strategy<Value = Vec<Step>> {
     let flush = prop_oneof![
         8 => Just(Flush::None),
+        1 => Just(Flush::Partial),
         1 => Just(Flush::Sync),
         1 => Just(Flush::Full),
     ];

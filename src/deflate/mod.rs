@@ -89,10 +89,16 @@ impl Default for Level {
 
 /// What [`Encoder::compress`] writes out, as zlib's flush modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Flush {
     /// Only what's ready: the encoder decides where blocks end, and holds
     /// back the end of the input for more.
     None,
+    /// All of the input so far, so that the other end can decompress all of
+    /// it, ending with an empty 10-bit block rather than on a byte
+    /// boundary: a few bytes less than [`Sync`](Flush::Sync). zlib's
+    /// `Z_PARTIAL_FLUSH`.
+    Partial,
     /// All of the input so far, ending on a byte boundary with an empty
     /// stored block (`00 00 FF FF`), so that the other end can decompress
     /// all of it. Costs a little compression each time.
@@ -105,7 +111,8 @@ pub enum Flush {
 }
 
 /// The most bytes [`Encoder::compress`] writes for a `len`-byte stream in
-/// `format`, given in calls without [`Flush::Sync`] or [`Flush::Full`].
+/// `format`, given in calls without [`Flush::Partial`], [`Flush::Sync`] or
+/// [`Flush::Full`].
 #[must_use]
 pub const fn compress_bound(format: Format, len: usize) -> usize {
     // Blocks are at least `MIN_BLOCK_LENGTH` long but for the last, and never

@@ -152,6 +152,7 @@ struct Step {
 fn flush_strategy() -> impl Strategy<Value = Flush> {
     prop_oneof![
         8 => Just(Flush::None),
+        1 => Just(Flush::Partial),
         1 => Just(Flush::Sync),
         1 => Just(Flush::Full),
     ]
@@ -212,7 +213,9 @@ fn stream(format: Format, level: Level, data: &[u8], steps: &[Step], buf_len: us
                 let p = d.decompress(&out, &mut dbuf, false).unwrap();
                 assert_eq!(p.consumed, out.len());
                 assert_eq!(p.output, &data[..fed]);
-                assert_eq!(out[out.len() - 4..], [0, 0, 0xFF, 0xFF]);
+                if s.flush != Flush::Partial {
+                    assert_eq!(out[out.len() - 4..], [0, 0, 0xFF, 0xFF]);
+                }
             }
         }
         if fed == data.len() {
@@ -280,6 +283,36 @@ fn repeated_sync_flushes_add_nothing() {
     assert_eq!(p.output, [0, 0, 0, 0xFF, 0xFF]);
     let p = e.compress(b"abcabc", &mut out, Flush::Finish);
     assert_eq!(decompress(Format::Deflate, p.output), b"abc");
+}
+
+/// A partial flush ends with zlib's 10-bit empty static block, unaligned. A
+/// repeated one, or one after a sync flush, adds nothing; a sync flush
+/// after one adds its marker, to end on a byte boundary.
+#[test]
+fn partial_flush_marker() {
+    let data = incompressible(256);
+    let mut e = Encoder::new(Format::Deflate, Level::DEFAULT);
+    let mut out = vec![0; 1024];
+    let p = e.compress(&data, &mut out, Flush::Partial);
+    // The stored block, then the marker: 3 bits of header (not last,
+    // static codes) and the 7-bit end-of-block code, 2 bits still pending.
+    assert_eq!(p.output[..5], [0, 0, 1, 0xFF, !1]);
+    assert_eq!(p.output[5..261], data);
+    assert_eq!(p.output[261..], [0b010]);
+    let mut n = p.output.len();
+    let p = e.compress(&data, &mut out[n..], Flush::Partial);
+    assert_eq!(p.output.len(), 0);
+    // The 2 pending bits, the empty stored block's header, its padding.
+    let p = e.compress(&data, &mut out[n..], Flush::Sync);
+    assert_eq!(p.output, [0, 0, 0, 0xFF, 0xFF]);
+    n += p.output.len();
+    let p = e.compress(&data, &mut out[n..], Flush::Partial);
+    assert_eq!(p.output.len(), 0);
+    let p = e.compress(&data, &mut out[n..], Flush::Finish);
+    assert!(p.done);
+    n += p.output.len();
+    assert_eq!(decompress(Format::Deflate, &out[..n]), data);
+    assert_eq!(decompress_miniz(Format::Deflate, &out[..n]), data);
 }
 
 /// `make_room` after every call, with one-byte outputs: some call ends as a

@@ -33,6 +33,7 @@ fuzz_target!(|data: &[u8]| {
             let flush = match c[1] % 8 {
                 0 => Flush::Sync,
                 1 => Flush::Full,
+                2 => Flush::Partial,
                 _ => Flush::None,
             };
             let out_len = [1, 7, 100, 4096, 1 << 20][usize::from(c[1] >> 3) % 5];
