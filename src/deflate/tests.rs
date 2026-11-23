@@ -275,8 +275,11 @@ fn repeated_sync_flushes_add_nothing() {
     assert_eq!(out[n - 4..n], [0, 0, 0xFF, 0xFF]);
     let p = e.compress(b"abc", &mut out, Flush::Sync);
     assert_eq!(p.output.len(), 0);
+    // A full flush still writes its marker, and forgets "abc".
     let p = e.compress(b"abc", &mut out, Flush::Full);
-    assert_eq!(p.output.len(), 0);
+    assert_eq!(p.output, [0, 0, 0, 0xFF, 0xFF]);
+    let p = e.compress(b"abcabc", &mut out, Flush::Finish);
+    assert_eq!(decompress(Format::Deflate, p.output), b"abc");
 }
 
 /// `make_room` after every call, with one-byte outputs: some call ends as a

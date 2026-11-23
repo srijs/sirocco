@@ -20,7 +20,7 @@ enum Stage {
     Body,
     /// A sync or full flush's block is written: its marker is next.
     Marker {
-        full: bool,
+        flush: Flush,
     },
     /// The last block is written: the trailer is next.
     Trailer,
@@ -141,9 +141,10 @@ struct State {
     check: u32,
     total_in: u64,
     total_out: u64,
-    /// The position of the last sync or full flush, which a repeated one
-    /// doesn't add to.
-    flushed_at: Option<usize>,
+    /// The position and kind of the last sync or full flush. As in zlib,
+    /// another flush there adds nothing unless it's a stronger kind: a full
+    /// flush after a sync one still forgets the data before it.
+    flushed_at: Option<(usize, Flush)>,
 }
 
 impl<T> core::fmt::Debug for Encoder<T> {
@@ -405,7 +406,9 @@ impl State {
         if in_block {
             p.block.start -= drop;
         }
-        self.flushed_at = self.flushed_at.and_then(|f| f.checked_sub(drop));
+        self.flushed_at = self
+            .flushed_at
+            .and_then(|(f, kind)| Some((f.checked_sub(drop)?, kind)));
         drop
     }
 
@@ -430,13 +433,13 @@ impl State {
                         return false;
                     }
                 }
-                Stage::Marker { full } => {
+                Stage::Marker { flush: kind } => {
                     self.w.stage_marker(false);
                     let pos = self.parser.pos;
-                    if full {
+                    if kind == Flush::Full {
                         self.reset_matches(t, pos, None);
                     }
-                    self.flushed_at = Some(pos);
+                    self.flushed_at = Some((pos, kind));
                     self.stage = Stage::Body;
                 }
                 Stage::Trailer => {
@@ -532,13 +535,12 @@ impl State {
         match flush {
             Flush::None => false,
             Flush::Sync | Flush::Full => {
-                if self.flushed_at == Some(pos) {
+                if matches!(self.flushed_at, Some((at, last)) if at == pos && strength(flush) <= strength(last))
+                {
                     return false;
                 }
                 self.end_block(t, false);
-                self.stage = Stage::Marker {
-                    full: flush == Flush::Full,
-                };
+                self.stage = Stage::Marker { flush };
                 true
             }
             Flush::Finish => {
@@ -574,6 +576,17 @@ impl State {
             Format::Zlib => crate::checksum::adler32(self.check, data),
             Format::Gzip => crate::checksum::crc32(self.check, data),
         };
+    }
+}
+
+/// How much a flush does, as zlib ranks them: one right after another adds
+/// nothing unless it does more.
+const fn strength(flush: Flush) -> u8 {
+    match flush {
+        Flush::None => 0,
+        Flush::Sync => 1,
+        Flush::Full => 2,
+        Flush::Finish => 3,
     }
 }
 
