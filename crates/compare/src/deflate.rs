@@ -168,10 +168,19 @@ pub fn sirocco_compress_stream(
         compressed: Vec::new(),
         flushes: Vec::new(),
     };
-    let mut run = |e: &mut Encoder, buf: &[u8], out: &mut Vec<u8>, flush, out_len: usize| loop {
-        let p = e.compress(buf, &mut piece[..out_len.max(1)], flush);
+    // Makes room after every call, as a caller may, so that it also comes
+    // at every point between blocks.
+    let mut run = |e: &mut Encoder,
+                   buf: &mut [u8],
+                   len: &mut usize,
+                   out: &mut Vec<u8>,
+                   flush,
+                   out_len: usize| loop {
+        let p = e.compress(&buf[..*len], &mut piece[..out_len.max(1)], flush);
         out.extend_from_slice(p.output);
-        if p.done || !p.full {
+        let (done, full) = (p.done, p.full);
+        *len -= e.make_room(&mut buf[..*len]);
+        if done || !full {
             return;
         }
     };
@@ -181,12 +190,12 @@ pub fn sirocco_compress_stream(
             if len == buf_len {
                 run(
                     &mut e,
-                    &buf[..len],
+                    &mut buf,
+                    &mut len,
                     &mut s.compressed,
                     Flush::None,
                     step.out_len,
                 );
-                len -= e.make_room(&mut buf[..len]);
                 assert!(len < buf_len, "make_room freed nothing");
             }
             let n = add.min(buf_len - len);
@@ -195,7 +204,8 @@ pub fn sirocco_compress_stream(
         }
         run(
             &mut e,
-            &buf[..len],
+            &mut buf,
+            &mut len,
             &mut s.compressed,
             step.flush,
             step.out_len,
@@ -209,7 +219,14 @@ pub fn sirocco_compress_stream(
         }
     }
     let last = steps.last().map_or(1 << 16, |s| s.out_len);
-    run(&mut e, &buf[..len], &mut s.compressed, Flush::Finish, last);
+    run(
+        &mut e,
+        &mut buf,
+        &mut len,
+        &mut s.compressed,
+        Flush::Finish,
+        last,
+    );
     assert_eq!(e.total_in(), data.len() as u64);
     assert_eq!(e.total_out(), s.compressed.len() as u64);
     s
